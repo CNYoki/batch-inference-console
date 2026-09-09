@@ -1,8 +1,8 @@
 import { http } from './client'
 import type {
-  AuthInfo, Dashboard, Job, JobErrorRow, JobList, ModelConfig, ModelOption, ModelOptions,
-  MailTestResult, MyUsage, PersonalModels, ResultPage, RetentionPreview, ScriptConfig,
-  ScriptPreview, SystemSettings, UploadResult, User,
+  AuthInfo, Dashboard, DryRunResult, Job, JobErrorRow, JobList, MailTestResult, ModelConfig,
+  ModelOption, ModelOptions, MyUsage, PersonalModels, ResultPage, RetentionPreview,
+  ScriptConfig, ScriptPreview, SystemSettings, UploadResult, User,
 } from './types'
 
 export * from './types'
@@ -65,6 +65,17 @@ export const api = {
     concurrency?: number
     priority?: number
   }) => http.post<Job>('/jobs', payload).then((r) => r.data),
+  // 试跑：真发一条，超时交给后端的 request_timeout 管，前端不另设
+  dryRunJob: (payload: {
+    upload_id: string
+    model_source: 'shared' | 'personal'
+    model_config_id?: string | null
+    personal_model?: string | null
+    personal_token?: string | null
+    remember_token?: boolean
+    params: Record<string, unknown>
+  }) => http.post<DryRunResult>('/jobs/dry-run', payload, { timeout: 0, skipErrorToast: true })
+    .then((r) => r.data),
   jobs: (params: {
     page?: number; page_size?: number; status?: string; keyword?: string; mine?: boolean
   }) => http.get<JobList>('/jobs', { params }).then((r) => r.data),

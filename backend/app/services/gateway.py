@@ -140,6 +140,10 @@ def build_personal_config(model_name: str, token: str, runtime: dict) -> ModelCo
             runtime.get("user_gateway_reasoning_payload")
             or DEFAULTS["user_gateway_reasoning_payload"]
         ),
+        reasoning_effort_options=[
+            str(o) for o in (runtime.get("user_gateway_reasoning_effort_options") or [])
+        ],
+        reasoning_default_effort=str(runtime.get("user_gateway_reasoning_default_effort") or ""),
         max_concurrency=int(runtime.get("user_gateway_max_concurrency") or 4),
         rpm_limit=0,
         tpm_limit=0,

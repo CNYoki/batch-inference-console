@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import random
 import time
@@ -20,6 +21,11 @@ log = logging.getLogger(__name__)
 _PROTECTED_BODY_KEYS = {"model", "stream", "stream_options"}
 
 RETRIABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 529}
+
+# reasoning_payload 里的档位占位符：出现在片段任意深度都会被换成用户选的档位，
+# 这样 {"reasoning_effort": "$effort"}、{"thinking": {"budget_tokens": "$effort"}}
+# 这些写法都能共用一套配置
+EFFORT_PLACEHOLDER = "$effort"
 
 
 class InferenceError(Exception):
@@ -82,12 +88,45 @@ class RateLimiter:
             await asyncio.sleep(min(wait, 5.0))
 
 
+def _fill_effort(value: Any, effort: str) -> Any:
+    """递归替换 payload 里的 $effort 占位符。
+
+    整个值就是占位符、且档位是纯数字时转成 int —— budget_tokens 这类
+    要数字的网关才不会收到字符串。
+    """
+    if isinstance(value, str):
+        if value == EFFORT_PLACEHOLDER:
+            return int(effort) if effort.lstrip("-").isdigit() else effort
+        return value.replace(EFFORT_PLACEHOLDER, effort)
+    if isinstance(value, dict):
+        return {k: _fill_effort(v, effort) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_fill_effort(v, effort) for v in value]
+    return value
+
+
+def resolve_reasoning_payload(mc: ModelConfig, effort: str | None = None) -> dict[str, Any]:
+    """开启推理时要合进请求体的片段，档位占位符已填好。"""
+    payload = dict(mc.reasoning_payload or {})
+    options = [str(o) for o in (mc.reasoning_effort_options or [])]
+    if not options:
+        return payload
+    if effort not in options:
+        # 用户没选或选了名单外的值：退回配置的默认档，默认档也没配就取第一项
+        default = mc.reasoning_default_effort or ""
+        effort = default if default in options else options[0]
+    return _fill_effort(payload, effort)
+
+
 def resolve_params(mc: ModelConfig, user_params: dict[str, Any] | None) -> dict[str, Any]:
     """合并：模型默认值 → 用户覆盖（受白名单约束）→ 强制值。"""
     params: dict[str, Any] = dict(mc.default_params or {})
     user_params = dict(user_params or {})
 
     reasoning = user_params.pop("reasoning", None)
+    # 只有模型声明了可选档位，reasoning_effort 才是控制键；
+    # 否则留在 user_params 里当普通参数透传（用户可能是从「附加参数」直接写的）
+    effort = user_params.pop("reasoning_effort", None) if mc.reasoning_effort_options else None
     allowed = set(mc.allowed_param_keys or [])
 
     for key, value in user_params.items():
@@ -108,7 +147,12 @@ def resolve_params(mc: ModelConfig, user_params: dict[str, Any] | None) -> dict[
 
     # 推理开关
     if mc.reasoning_mode == "forced" or (mc.reasoning_mode == "optional" and reasoning):
-        params.update(mc.reasoning_payload or {})
+        for key, value in resolve_reasoning_payload(mc, effort).items():
+            # chat_template_kwargs 这类嵌套字段跟已有值合并，别整个盖掉
+            if isinstance(value, dict) and isinstance(params.get(key), dict):
+                params[key] = {**params[key], **value}
+            else:
+                params[key] = value
 
     return params
 
@@ -231,6 +275,43 @@ class InferenceClient:
 
         raise last_error or InferenceError("未知错误")
 
+    async def try_once(self, body: dict[str, Any]) -> dict[str, Any]:
+        """试跑一条：只发一次、不重试、失败也不抛异常。
+
+        用户正对着弹窗等结果，重试三次再报错太慢；而且这里要的就是
+        原始状态码和响应正文 —— 哪里写错了让他自己看最直接。
+        """
+        started = time.monotonic()
+        try:
+            resp = await self._client.post(self.url, json=body)
+        except httpx.TimeoutException as exc:
+            return {"ok": False, "latency_ms": _elapsed_ms(started), "error": f"请求超时: {exc}"}
+        except httpx.HTTPError as exc:
+            return {"ok": False, "latency_ms": _elapsed_ms(started), "error": f"网络错误: {exc}"}
+
+        out: dict[str, Any] = {
+            "ok": resp.status_code < 400,
+            "status_code": resp.status_code,
+            "latency_ms": _elapsed_ms(started),
+        }
+        try:
+            data = resp.json()
+        except ValueError:
+            out["ok"] = False
+            out["error"] = f"响应不是合法 JSON: {resp.text[:1000]}"
+            return out
+
+        out["response"] = data
+        if out["ok"]:
+            out["content"] = extract_output_text(data)
+            out["usage"] = data.get("usage") or {}
+        else:
+            # 网关的报错信息通常嵌在 error.message 里，挑出来当主提示
+            err = data.get("error") if isinstance(data, dict) else None
+            message = err.get("message") if isinstance(err, dict) else None
+            out["error"] = f"HTTP {resp.status_code}: {message or json.dumps(data, ensure_ascii=False)[:1000]}"
+        return out
+
     async def probe(self) -> dict[str, Any]:
         """后台「测试连通性」用：发一条最小请求。"""
         body = {
@@ -256,6 +337,10 @@ class InferenceClient:
             "url": self.url,
             "detail": detail if not ok else _brief(detail),
         }
+
+
+def _elapsed_ms(started: float) -> int:
+    return int((time.monotonic() - started) * 1000)
 
 
 def _brief(data: Any) -> Any:

@@ -10,6 +10,9 @@ import type {
   Dashboard, MailTestResult, MyUsage, RetentionPreview, SystemSettings, WorkerInfo,
 } from '../api'
 import { usePolling } from '../hooks/usePolling'
+import {
+  EFFORT_LEVEL_OPTIONS, PRESET_SELECT_OPTIONS, REASONING_PRESETS, matchPreset,
+} from '../reasoning'
 import { STATUS_LABEL, formatBytes, formatNumber } from '../utils'
 
 type UsageRow = {
@@ -56,11 +59,30 @@ export default function AdminSystemPage() {
         ...s,
         smtp_password: '',
         user_gateway_reasoning_payload: JSON.stringify(s.user_gateway_reasoning_payload ?? {}, null, 2),
+        user_gateway_reasoning_preset: matchPreset(
+          s.user_gateway_reasoning_payload, s.user_gateway_reasoning_effort_options,
+        ),
       })
     }).catch(() => undefined)
   }, [load, form])
 
   usePolling(() => void load(), 5000)
+
+  // 「默认档位」的候选就是上面填的档位名单
+  const gatewayEfforts = Form.useWatch(
+    'user_gateway_reasoning_effort_options', form,
+  ) as string[] | undefined
+
+  /** 选中预设后填好请求体与档位；「自定义」保持已填内容不动 */
+  const applyPreset = (value: string) => {
+    const preset = REASONING_PRESETS.find((p) => p.value === value)
+    if (!preset) return
+    form.setFieldsValue({
+      user_gateway_reasoning_payload: JSON.stringify(preset.payload, null, 2),
+      user_gateway_reasoning_effort_options: [...preset.effortOptions],
+      user_gateway_reasoning_default_effort: preset.defaultEffort,
+    })
+  }
 
   const saveSettings = async () => {
     const values = await form.validateFields()
@@ -84,6 +106,8 @@ export default function AdminSystemPage() {
         default_user_storage_gb: values.default_user_storage_gb,
         user_gateway_reasoning_enabled: values.user_gateway_reasoning_enabled,
         user_gateway_reasoning_payload: parseJson(values.user_gateway_reasoning_payload),
+        user_gateway_reasoning_effort_options: values.user_gateway_reasoning_effort_options ?? [],
+        user_gateway_reasoning_default_effort: values.user_gateway_reasoning_default_effort ?? '',
         smtp_enabled: values.smtp_enabled,
         smtp_host: values.smtp_host,
         smtp_port: values.smtp_port,
@@ -107,6 +131,9 @@ export default function AdminSystemPage() {
         ...s,
         smtp_password: '',
         user_gateway_reasoning_payload: JSON.stringify(s.user_gateway_reasoning_payload ?? {}, null, 2),
+        user_gateway_reasoning_preset: matchPreset(
+          s.user_gateway_reasoning_payload, s.user_gateway_reasoning_effort_options,
+        ),
       })
       message.success('设置已保存')
     } catch (err) {
@@ -286,9 +313,23 @@ export default function AdminSystemPage() {
               valuePropName="checked" extra="开关在新建任务页默认关闭，由用户自行打开">
               <Switch />
             </Form.Item>
+            <Form.Item name="user_gateway_reasoning_preset" label="推理请求体写法"
+              extra="选一个常见写法自动填好右边两项">
+              <Select options={PRESET_SELECT_OPTIONS} onChange={applyPreset} style={{ width: 320 }} />
+            </Form.Item>
             <Form.Item name="user_gateway_reasoning_payload" label="开启推理时附加的请求参数"
-              extra='字段因网关而异：Qwen 系用 {"enable_thinking": true}，OpenAI 系用 {"reasoning_effort": "medium"}'>
+              extra='字段因网关而异；写 "$effort" 的位置会被换成用户选的档位'>
               <Input.TextArea rows={3} className="mono" style={{ width: 380 }} />
+            </Form.Item>
+            <Form.Item name="user_gateway_reasoning_effort_options" label="用户可选的推理档位"
+              extra="留空则不让用户选；列表外的档位可直接输入">
+              <Select mode="tags" options={EFFORT_LEVEL_OPTIONS}
+                placeholder="low, medium, high" style={{ width: 240 }} />
+            </Form.Item>
+            <Form.Item name="user_gateway_reasoning_default_effort" label="默认档位"
+              extra="留空则用名单第一项">
+              <Select allowClear placeholder="不指定" style={{ width: 140 }}
+                options={(gatewayEfforts ?? []).map((v: string) => ({ value: v, label: v }))} />
             </Form.Item>
           </Space>
           <Button type="primary" loading={saving} onClick={() => void saveSettings()}>保存网关设置</Button>

@@ -23,6 +23,7 @@ def make_mc(**overrides) -> ModelConfig:
         default_params={}, forced_params={}, allowed_param_keys=[],
         supports_temperature=True, supports_system_prompt=True, supports_json_mode=False,
         supports_tools=False, reasoning_mode="off", reasoning_payload={},
+        reasoning_effort_options=[], reasoning_default_effort="",
         max_concurrency=8, rpm_limit=0, tpm_limit=0, request_timeout=60, max_retries=1,
         max_tokens_cap=0, sort_order=0,
     )
@@ -73,6 +74,77 @@ def test_reasoning_optional_only_applies_when_requested():
 def test_reasoning_forced_always_applies():
     mc = make_mc(reasoning_mode="forced", reasoning_payload={"enable_thinking": True})
     assert resolve_params(mc, {})["enable_thinking"] is True
+
+
+def test_reasoning_effort_fills_placeholder():
+    mc = make_mc(
+        reasoning_mode="optional",
+        reasoning_payload={"reasoning_effort": "$effort"},
+        reasoning_effort_options=["low", "medium", "high"],
+    )
+    out = resolve_params(mc, {"reasoning": True, "reasoning_effort": "high"})
+    assert out == {"reasoning_effort": "high"}
+    # 档位是控制键，不会作为普通参数再透传一次
+    assert resolve_params(mc, {"reasoning_effort": "high"}) == {}
+
+
+def test_reasoning_effort_falls_back_to_first_option():
+    mc = make_mc(
+        reasoning_mode="optional",
+        reasoning_payload={"reasoning_effort": "$effort"},
+        reasoning_effort_options=["medium", "high"],
+    )
+    # 没选、或选了名单外的值，都退回第一档，避免把非法值发给网关
+    assert resolve_params(mc, {"reasoning": True})["reasoning_effort"] == "medium"
+    assert resolve_params(mc, {"reasoning": True, "reasoning_effort": "秘密"})[
+        "reasoning_effort"
+    ] == "medium"
+
+
+def test_reasoning_default_effort_wins_over_first_option():
+    """档位名单按强度排序，排头的 none 不该当默认值，所以默认档单独配。"""
+    mc = make_mc(
+        reasoning_mode="optional",
+        reasoning_payload={"reasoning_effort": "$effort"},
+        reasoning_effort_options=["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        reasoning_default_effort="medium",
+    )
+    assert resolve_params(mc, {"reasoning": True})["reasoning_effort"] == "medium"
+    assert resolve_params(mc, {"reasoning": True, "reasoning_effort": "xhigh"})[
+        "reasoning_effort"
+    ] == "xhigh"
+
+    # 默认档被从名单里删掉了，退回第一项而不是发一个网关不认的值
+    mc.reasoning_default_effort = "已删掉的档"
+    assert resolve_params(mc, {"reasoning": True})["reasoning_effort"] == "none"
+
+
+def test_reasoning_effort_placeholder_works_at_any_depth():
+    mc = make_mc(
+        reasoning_mode="forced",
+        reasoning_payload={"thinking": {"type": "enabled", "budget_tokens": "$effort"}},
+        reasoning_effort_options=["4096", "16384"],
+    )
+    out = resolve_params(mc, {"reasoning_effort": "16384"})
+    # 纯数字档位要转成 int，否则要 number 的网关会 422
+    assert out == {"thinking": {"type": "enabled", "budget_tokens": 16384}}
+
+
+def test_reasoning_payload_merges_into_existing_nested_key():
+    mc = make_mc(
+        reasoning_mode="forced",
+        default_params={"chat_template_kwargs": {"foo": 1}},
+        reasoning_payload={"chat_template_kwargs": {"enable_thinking": True}},
+    )
+    assert resolve_params(mc, {}) == {
+        "chat_template_kwargs": {"foo": 1, "enable_thinking": True},
+    }
+
+
+def test_reasoning_effort_passes_through_when_model_has_no_options():
+    """模型没声明档位时，reasoning_effort 就是个普通参数，原样透传。"""
+    mc = make_mc(reasoning_mode="off")
+    assert resolve_params(mc, {"reasoning_effort": "high"}) == {"reasoning_effort": "high"}
 
 
 def test_build_body_injects_system_prompt_once():

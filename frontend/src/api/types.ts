@@ -37,6 +37,10 @@ export interface ModelOption {
   supports_system_prompt: boolean
   supports_json_mode: boolean
   reasoning_mode: 'off' | 'optional' | 'forced'
+  /** 用户可选的推理档位；空数组表示不给选 */
+  reasoning_effort_options: string[]
+  /** 用户没选时用哪一档；空串表示取名单第一项 */
+  reasoning_default_effort: string
   max_concurrency: number
   max_tokens_cap: number
 }
@@ -191,6 +195,8 @@ export interface SystemSettings {
   user_gateway_max_tokens_cap: number
   user_gateway_reasoning_enabled: boolean
   user_gateway_reasoning_payload: Record<string, unknown>
+  user_gateway_reasoning_effort_options: string[]
+  user_gateway_reasoning_default_effort: string
 
   file_retention_days: number
   purge_input_files: boolean
@@ -289,4 +295,18 @@ export interface RetentionPreview {
   expiring_jobs: number
   expiring_bytes: number
   already_purged_jobs: number
+}
+
+/** 提交前试跑一条的结果 */
+export interface DryRunResult {
+  ok: boolean
+  custom_id?: string | null
+  item_index: number
+  request_body: Record<string, unknown>
+  status_code?: number | null
+  latency_ms: number
+  content?: string | null
+  usage: Record<string, number>
+  error?: string | null
+  response?: Record<string, unknown> | null
 }

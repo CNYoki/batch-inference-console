@@ -1,6 +1,7 @@
 """任务：上传校验 → 创建 → 队列控制 → 结果预览与导出。"""
 from __future__ import annotations
 
+import itertools
 import logging
 import re
 import shutil
@@ -30,16 +31,19 @@ from ..models import (
 )
 from ..schemas import (
     JobCreate,
+    JobDryRun,
+    JobDryRunOut,
     JobErrorOut,
     JobListOut,
     JobOut,
     JobPatch,
+    JobSubmission,
     UploadValidateOut,
 )
 from ..services import jsonl as jsonl_svc
 from ..services import results as results_svc
 from ..services.gateway import GatewayError, build_personal_config, fetch_models
-from ..services.inference import resolve_params
+from ..services.inference import InferenceClient, build_request_body, resolve_params
 from ..services.queue import queue
 from ..services.settings_store import read_runtime
 from ..services.storage import QUOTA_MESSAGE, check_before_upload
@@ -270,7 +274,52 @@ async def create_job(payload: JobCreate, user: CurrentUser, db: DB) -> JobOut:
     return _to_out(job, await queue.queued_position(job.id))
 
 
-async def _resolve_shared_model(payload: JobCreate, user: User, db: DB) -> ModelConfig:
+@router.post("/dry-run", response_model=JobDryRunOut)
+async def dry_run(payload: JobDryRun, user: CurrentUser, db: DB) -> JobDryRunOut:
+    """拿上传文件里的一条真发一次请求，不建任务、不落盘、不入队。
+
+    参数与提交任务完全一致，所以模型名写错、密钥失效、推理字段网关不认、
+    max_tokens 超限这些坑能当场暴露，省得整批排完队再一起失败。
+    """
+    src = _upload_path(user.id, payload.upload_id)
+    if not src.exists():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "上传已失效，请重新上传文件")
+
+    if payload.model_source == ModelSource.personal.value:
+        mc = await _resolve_personal_model(payload, user, db)
+    else:
+        mc = await _resolve_shared_model(payload, user, db)
+    # 个人 token 可能刚在 _resolve_personal_model 里存下来
+    await db.commit()
+
+    try:
+        item = next(itertools.islice(jsonl_svc.iter_items(src), payload.item_index, None), None)
+    except jsonl_svc.JsonlError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    if item is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"文件里没有第 {payload.item_index + 1} 条"
+        )
+
+    # 和 worker 走同一套拼装逻辑，试跑才有意义
+    resolved = _resolve_job_params(mc, payload)
+    system_prompt = resolved.get("_system_prompt")
+    body = build_request_body(
+        mc, item.body, {k: v for k, v in resolved.items() if not k.startswith("_")}, system_prompt,
+    )
+
+    try:
+        async with InferenceClient(mc) as client:
+            out = await client.try_once(body)
+    except Exception as exc:  # noqa: BLE001 — 建客户端就失败（密钥解密等），原因照样回显
+        out = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    return JobDryRunOut(
+        custom_id=item.custom_id, item_index=payload.item_index, request_body=body, **out,
+    )
+
+
+async def _resolve_shared_model(payload: JobSubmission, user: User, db: DB) -> ModelConfig:
     mc = await db.get(ModelConfig, payload.model_config_id)
     if mc is None or not mc.enabled:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "模型不可用")
@@ -279,7 +328,7 @@ async def _resolve_shared_model(payload: JobCreate, user: User, db: DB) -> Model
     return mc
 
 
-async def _resolve_personal_model(payload: JobCreate, user: User, db: DB) -> ModelConfig:
+async def _resolve_personal_model(payload: JobSubmission, user: User, db: DB) -> ModelConfig:
     """校验用户 token 对该模型确实有权限，并返回一个内存里的虚拟模型配置。"""
     runtime = await read_runtime(db)
     if not runtime["user_gateway_enabled"]:
@@ -310,7 +359,7 @@ async def _resolve_personal_model(payload: JobCreate, user: User, db: DB) -> Mod
     return build_personal_config(payload.personal_model, token, runtime)
 
 
-def _resolve_job_params(mc: ModelConfig, payload: JobCreate) -> dict:
+def _resolve_job_params(mc: ModelConfig, payload: JobSubmission) -> dict:
     """把前端参数与模型配置合并成 worker 直接可用的请求参数。"""
     p = payload.params
     user_params: dict = {
@@ -327,6 +376,8 @@ def _resolve_job_params(mc: ModelConfig, payload: JobCreate) -> dict:
         user_params["response_format"] = {"type": "json_object"}
     if p.reasoning:
         user_params["reasoning"] = True
+    if p.reasoning_effort:
+        user_params["reasoning_effort"] = p.reasoning_effort
 
     resolved = resolve_params(mc, user_params)
     if p.system_prompt and mc.supports_system_prompt:
