@@ -1,0 +1,11 @@
+# 可选：把 API 端口发布到宿主机，用于直连调试 / 脚本调用 / CI。
+#
+#   docker compose -f docker-compose.yml -f docker-compose.expose-api.yml up -d
+#   docker compose -f docker-compose.external.yml -f docker-compose.expose-api.yml up -d
+#
+# 默认只绑 127.0.0.1，不暴露给局域网。确实要对外开放就把 BIND_ADDR 设成 0.0.0.0，
+# 但要清楚这条路径绕过了 nginx（也就绕过了 nginx 上的限流、超时、访问日志等设置）。
+services:
+  api:
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${API_PORT:-8000}:8000"

@@ -1,0 +1,24 @@
+html, body, #root { height: 100%; margin: 0; }
+
+/* 应用外壳固定为一屏高，滚动只发生在内容区 —— 否则侧边栏会跟着内容一起滚走。
+   dvh 处理移动端浏览器地址栏伸缩；不支持 dvh 的浏览器用上面那行 vh 兜底。
+   注意不要给 body 加 overflow:hidden：登录页不在这个外壳里，
+   小屏下它比视口高时还需要页面本身能滚。 */
+.app-shell { height: 100vh; height: 100dvh; overflow: hidden; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+  'Hiragino Sans GB', 'Microsoft YaHei', sans-serif; }
+
+.page-header { margin-bottom: 16px; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+.pre-wrap { white-space: pre-wrap; word-break: break-word; }
+.output-cell { max-height: 120px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+
+/* 内层可滚动区域滚到头时，不要把滚动继续传递给外层
+   —— 否则在结果单元格里滚几下，外面整页会跟着动 */
+.app-scroll,
+.output-cell,
+.scroll-box,
+.app-scroll pre,
+.app-scroll .ant-table-body { overscroll-behavior: contain; }
+
+.scroll-box { overflow: auto; }

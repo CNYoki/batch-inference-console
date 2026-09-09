@@ -1,0 +1,36 @@
+# 可选：把数据目录挂到宿主机的一个路径上，方便直接备份和查看。
+# 默认的命名卷躲在 docker 的内部目录里，想 tar 一下不方便。
+#
+#   DATA_HOST_DIR=/srv/batch-inference/data \
+#     docker compose -f docker-compose.external.yml -f docker-compose.bind-data.yml up -d
+#
+# 目录不用手动建，短语法 bind mount 会自动创建（driver_opts 那种写法才必须先建好）。
+#
+# 关于 user: "0:0" —— 这是为 rootless docker 准备的：
+#   rootless 下容器内的 root 映射到宿主机上启动 docker 的那个普通用户，
+#   所以文件在宿主机上归你所有，能直接读写备份，并没有真的提权。
+#   如果不加，镜像里的 appuser(uid 1000) 会映射到宿主机 uid 100999，
+#   写出来的文件你自己都打不开。
+#
+#   用的是 rootful docker（sudo 装的、docker.sock 属 root）请改成另一种做法：
+#   删掉下面三处 user，先手动建目录并 chown 到 uid 1000：
+#     sudo mkdir -p /srv/batch-inference/data
+#     sudo chown -R 1000:1000 /srv/batch-inference/data
+#   否则容器里的 appuser 无权写入。
+#   分辨方式：docker info --format '{{.SecurityOptions}}' 里有 rootless 就是 rootless。
+
+services:
+  migrate:
+    user: "0:0"
+    volumes: !override
+      - "${DATA_HOST_DIR:?请设置 DATA_HOST_DIR，例 /srv/batch-inference/data}:/data"
+
+  api:
+    user: "0:0"
+    volumes: !override
+      - "${DATA_HOST_DIR:?请设置 DATA_HOST_DIR，例 /srv/batch-inference/data}:/data"
+
+  worker:
+    user: "0:0"
+    volumes: !override
+      - "${DATA_HOST_DIR:?请设置 DATA_HOST_DIR，例 /srv/batch-inference/data}:/data"

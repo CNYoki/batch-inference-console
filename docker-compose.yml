@@ -1,0 +1,109 @@
+# 完整自带 MySQL + Redis 的部署。
+# 若要接入已有的 MySQL/Redis：注释掉 mysql / redis 两个服务，
+# 并在 .env 中把 DATABASE_URL / REDIS_URL 指向外部地址即可。
+
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpass}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-batch_inference}
+      MYSQL_USER: ${MYSQL_USER:-batchinfer}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-batchinfer}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-rootpass}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # 一次性任务：把数据库迁移到最新版本，成功退出后 api/worker 才启动。
+  # 不能靠 create_all —— 它只建表不改表，升级时新增字段永远不会生效
+  migrate:
+    build: ./backend
+    command: ["alembic", "upgrade", "head"]
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-mysql+asyncmy://batchinfer:batchinfer@mysql:3306/batch_inference}
+      DATA_DIR: /data
+    volumes:
+      - app_data:/data
+    depends_on:
+      mysql: { condition: service_healthy }
+    restart: "no"
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-mysql+asyncmy://batchinfer:batchinfer@mysql:3306/batch_inference}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      DATA_DIR: /data
+      # 建表交给上面的 migrate 服务
+      AUTO_CREATE_TABLES: "false"
+    volumes:
+      - app_data:/data
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    # 默认不对外发布 8000 —— nginx 在同一个 docker 网络里用 http://api:8000 直连，
+    # 多开一个宿主机入口只会绕过 nginx、平白增加暴露面。
+    # 需要直连调试时：docker compose -f docker-compose.yml -f docker-compose.expose-api.yml up -d
+    expose:
+      - "8000"
+
+  worker:
+    build: ./backend
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker.main"]
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-mysql+asyncmy://batchinfer:batchinfer@mysql:3306/batch_inference}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      DATA_DIR: /data
+      AUTO_CREATE_TABLES: "false"
+    volumes:
+      # worker 与 api 必须共享同一份数据卷：输入文件与结果文件都在这里
+      - app_data:/data
+    # 等迁移跑完，否则 worker 会在表还不存在时启动
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    # 镜像里的 healthcheck 是给 API 用的（curl 本机 8000），
+    # worker 不监听端口，这里关掉，否则会一直显示 unhealthy
+    healthcheck:
+      disable: true
+    # 加机器/加副本即可扩容：docker compose up -d --scale worker=4
+    deploy:
+      replicas: ${WORKER_REPLICAS:-2}
+
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "${WEB_PORT:-8080}:80"
+
+volumes:
+  mysql_data:
+  redis_data:
+  app_data:

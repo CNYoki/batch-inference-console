@@ -1,0 +1,85 @@
+# 使用现成的 MySQL 与 Redis 部署（不自带数据库）。
+#
+#   docker compose -f docker-compose.external.yml up -d --build
+#
+# 前置条件：.env 里的 DATABASE_URL / REDIS_URL 必须是**容器视角**能连通的地址。
+# 容器不在宿主机的 network namespace 里，所以：
+#   · 127.0.0.1 / localhost  →  指的是容器自己，一定连不上宿主机的服务
+#   · 宿主机上的服务          →  用宿主机的局域网 IP，例 192.168.1.10:6379
+#   · 另一台机器上的服务      →  直接写它的 IP，正常路由即可
+#   · docker 网桥网关 IP      →  可能被宿主机防火墙拦住，不如 LAN IP 可靠
+# 写完可以先验一下：
+#   docker run --rm nginx:stable bash -c \
+#     'timeout 3 bash -c "cat </dev/null >/dev/tcp/192.168.1.10/6379" && echo 可达 || echo 不可达'
+
+services:
+  # 一次性任务：把数据库迁移到最新版本，成功退出后 api/worker 才启动。
+  # 不能靠应用启动时的 create_all —— 它只建表不改表，升级时新增字段不会生效
+  migrate:
+    build: ./backend
+    command: ["alembic", "upgrade", "head"]
+    env_file: .env
+    environment:
+      # :? 表示未设置就直接报错退出，避免悄悄连到不存在的默认地址
+      DATABASE_URL: ${DATABASE_URL:?请在 .env 里设置容器可达的 DATABASE_URL}
+      DATA_DIR: /data
+    volumes:
+      - app_data:/data
+    restart: "no"
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?请在 .env 里设置容器可达的 DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:?请在 .env 里设置容器可达的 REDIS_URL}
+      DATA_DIR: /data
+      # 建表交给上面的 migrate 服务
+      AUTO_CREATE_TABLES: "false"
+    volumes:
+      - app_data:/data
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    # 默认不对外发布 8000 —— nginx 在同一个 docker 网络里用 http://api:8000 直连。
+    # 需要直连调试时加上 docker-compose.expose-api.yml
+    expose:
+      - "8000"
+
+  worker:
+    build: ./backend
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker.main"]
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?请在 .env 里设置容器可达的 DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:?请在 .env 里设置容器可达的 REDIS_URL}
+      DATA_DIR: /data
+      AUTO_CREATE_TABLES: "false"
+    volumes:
+      # 必须和 api 共享同一个卷：输入文件与结果文件都走磁盘
+      - app_data:/data
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    # 镜像里的 healthcheck 是给 API 用的（curl 本机 8000），worker 不监听端口，
+    # 不关掉会一直显示 unhealthy
+    healthcheck:
+      disable: true
+    # 扩容：docker compose -f docker-compose.external.yml up -d --scale worker=8
+    deploy:
+      replicas: ${WORKER_REPLICAS:-2}
+
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "${WEB_PORT:-8080}:80"
+
+volumes:
+  # api / worker / migrate 共享。想直接落到宿主机目录方便备份，可改成：
+  #   app_data:
+  #     driver: local
+  #     driver_opts: { type: none, o: bind, device: /srv/batch-inference/data }
+  app_data:

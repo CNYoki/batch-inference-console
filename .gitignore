@@ -1,0 +1,25 @@
+# Environment and secrets
+.env
+.env.local
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+*.tsbuildinfo
+
+# Node
+node_modules/
+frontend/dist/
+*.log
+
+# Runtime data: uploaded inputs, generated results, logs, pid files.
+# Use data/* rather than data/ — git will not descend into an excluded
+# directory, so the .gitkeep exception below would never take effect.
+data/*
+!data/.gitkeep

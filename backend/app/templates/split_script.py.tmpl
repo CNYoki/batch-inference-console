@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""批量推理输入文件生成脚本（由「批量推理平台」自动生成）
+
+把本地的 CSV / JSONL / Parquet 数据转成平台可直接上传的 JSONL，
+并按行数与文件大小自动切分。
+
+用法：
+    python __SCRIPT_NAME__                 # 按下面 CONFIG 的配置跑
+    python __SCRIPT_NAME__ --dry-run       # 只统计不写文件，先看看会产出多少
+    python __SCRIPT_NAME__ --limit 100     # 只处理前 100 行，用于试跑
+
+依赖：CSV / JSONL 只用标准库；Parquet 需要 pyarrow（pip install pyarrow）。
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import sys
+import uuid
+from pathlib import Path
+
+# --------------------------------------------------------------------------- #
+# 配置（在平台上填好后生成；可以直接改这里再跑）
+# --------------------------------------------------------------------------- #
+CONFIG = json.loads(__CONFIG_JSON__)
+
+# csv 大字段（长文本列）默认会触发 field larger than field limit 错误
+csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
+
+
+# --------------------------------------------------------------------------- #
+# 读取：三种格式统一产出 dict 迭代器
+# --------------------------------------------------------------------------- #
+def iter_source_files(path_str: str, fmt: str, recursive: bool) -> list[Path]:
+    path = Path(path_str).expanduser()
+    if path.is_file():
+        return [path]
+    if not path.is_dir():
+        sys.exit(f"[错误] 路径不存在：{path}")
+
+    exts = {"csv": [".csv"], "jsonl": [".jsonl", ".ndjson", ".json"], "parquet": [".parquet", ".pq"]}[fmt]
+    pattern = "**/*" if recursive else "*"
+    files = sorted(p for p in path.glob(pattern) if p.is_file() and p.suffix.lower() in exts)
+    if not files:
+        sys.exit(f"[错误] 目录 {path} 下没有找到 {'/'.join(exts)} 文件")
+    return files
+
+
+def read_csv(path: Path):
+    with path.open("r", encoding=CONFIG["encoding"], newline="", errors="replace") as fh:
+        for row in csv.DictReader(fh, delimiter=CONFIG["csv_delimiter"]):
+            yield row
+
+
+def read_jsonl(path: Path):
+    with path.open("r", encoding=CONFIG["encoding"], errors="replace") as fh:
+        for lineno, raw in enumerate(fh, 1):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                print(f"  [跳过] {path.name}:{lineno} 不是合法 JSON：{exc.msg}")
+                continue
+            if isinstance(obj, dict):
+                yield obj
+            else:
+                print(f"  [跳过] {path.name}:{lineno} 不是 JSON 对象")
+
+
+def read_parquet(path: Path):
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        sys.exit("[错误] 读取 parquet 需要 pyarrow，请先执行：pip install pyarrow")
+    parquet_file = pq.ParquetFile(path)
+    # 分批读，避免大文件一次性进内存
+    for batch in parquet_file.iter_batches(batch_size=2048):
+        yield from batch.to_pylist()
+
+
+READERS = {"csv": read_csv, "jsonl": read_jsonl, "parquet": read_parquet}
+
+
+# --------------------------------------------------------------------------- #
+# 渲染
+# --------------------------------------------------------------------------- #
+def render(template: str, values: dict) -> str:
+    """把 {{变量名}} 替换成对应字段的值。未定义的变量原样保留，便于发现拼写错误。"""
+    out = template
+    for name, value in values.items():
+        out = out.replace("{{" + name + "}}", value)
+    return out
+
+
+def field_value(row: dict, field: str) -> str:
+    value = row.get(field)
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def make_custom_id(row: dict, index: int) -> str:
+    mode = CONFIG["custom_id_mode"]
+    if mode == "field":
+        raw = field_value(row, CONFIG["custom_id_field"] or "")
+        if not raw:
+            raw = f"row-{index + 1}"
+    elif mode == "uuid":
+        raw = uuid.uuid4().hex
+    else:
+        raw = str(index + 1)
+    return f"{CONFIG['custom_id_prefix']}{raw}"
+
+
+def build_record(row: dict, index: int) -> tuple[dict | None, str]:
+    """返回 (记录, 跳过原因)。记录为 None 表示这一行被跳过。"""
+    values = {v["name"]: field_value(row, v["field"]) for v in CONFIG["variables"]}
+    prompt = render(CONFIG["prompt_template"], values)
+
+    if CONFIG["skip_empty"] and not prompt.strip():
+        return None, "prompt 为空"
+
+    max_chars = CONFIG["max_prompt_chars"]
+    if max_chars and len(prompt) > max_chars:
+        if CONFIG["on_oversize"] == "skip":
+            return None, f"prompt 超过 {max_chars} 字符"
+        prompt = prompt[:max_chars]
+
+    messages = []
+    if CONFIG["system_prompt"]:
+        messages.append({"role": "system", "content": CONFIG["system_prompt"]})
+    messages.append({"role": "user", "content": prompt})
+
+    body = {"messages": messages}
+    body.update(CONFIG["extra_body"])
+    if CONFIG["model"]:
+        body["model"] = CONFIG["model"]
+
+    return {
+        "custom_id": make_custom_id(row, index),
+        "method": "POST",
+        "url": CONFIG["endpoint_path"],
+        "body": body,
+    }, ""
+
+
+# --------------------------------------------------------------------------- #
+# 写出：按行数与字节数滚动切分
+# --------------------------------------------------------------------------- #
+class RollingWriter:
+    def __init__(self, out_dir: Path, prefix: str, max_rows: int, max_bytes: int, dry_run: bool):
+        self.out_dir = out_dir
+        self.prefix = prefix
+        self.max_rows = max_rows
+        self.max_bytes = max_bytes
+        self.dry_run = dry_run
+        self.part = 0
+        self.rows_in_part = 0
+        self.bytes_in_part = 0
+        self.files: list[tuple[Path, int, int]] = []
+        self._fh = None
+        # 防止 close() 被调用两次时把最后一个分片重复记进统计
+        self._pending = False
+
+    def _open_next(self) -> None:
+        self.close()
+        self.part += 1
+        self.rows_in_part = 0
+        self.bytes_in_part = 0
+        self._pending = True
+        if not self.dry_run:
+            self.out_dir.mkdir(parents=True, exist_ok=True)
+            path = self.out_dir / f"{self.prefix}_{self.part:04d}.jsonl"
+            self._fh = path.open("w", encoding="utf-8")
+
+    def write(self, line: str) -> None:
+        payload = line.encode("utf-8")
+        need_new = (
+            self.part == 0
+            or (self.max_rows and self.rows_in_part >= self.max_rows)
+            # 加上 rows_in_part 这个条件：单行本身就超过大小上限时，
+            # 否则会每写一行都滚一次，产出一堆只有一行的文件
+            or (
+                self.max_bytes
+                and self.rows_in_part
+                and self.bytes_in_part + len(payload) > self.max_bytes
+            )
+        )
+        if need_new:
+            self._open_next()
+
+        if self._fh is not None:
+            self._fh.write(line)
+        self.rows_in_part += 1
+        self.bytes_in_part += len(payload)
+
+    def close(self) -> None:
+        if self._fh is not None:
+            self._fh.close()
+            self._fh = None
+        if self.part and self._pending:
+            name = self.out_dir / f"{self.prefix}_{self.part:04d}.jsonl"
+            self.files.append((name, self.rows_in_part, self.bytes_in_part))
+            self._pending = False
+
+
+def human(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
+# --------------------------------------------------------------------------- #
+def main() -> int:
+    parser = argparse.ArgumentParser(description="生成批量推理输入 JSONL")
+    parser.add_argument("--dry-run", action="store_true", help="只统计，不写文件")
+    parser.add_argument("--limit", type=int, default=0, help="只处理前 N 行")
+    parser.add_argument("--source", default=None, help="覆盖配置里的输入路径")
+    parser.add_argument("--out", default=None, help="覆盖配置里的输出目录")
+    args = parser.parse_args()
+
+    source = args.source or CONFIG["source_path"]
+    out_dir = Path(args.out or CONFIG["output_dir"]).expanduser()
+    fmt = CONFIG["source_format"]
+
+    files = iter_source_files(source, fmt, CONFIG["recursive"])
+    print(f"输入：{source}")
+    print(f"格式：{fmt}    找到 {len(files)} 个文件")
+    if args.dry_run:
+        print("模式：dry-run（不会写任何文件）")
+    print("-" * 60)
+
+    writer = RollingWriter(
+        out_dir,
+        CONFIG["output_prefix"],
+        CONFIG["max_rows_per_file"],
+        CONFIG["max_file_size_mb"] * 1024 * 1024,
+        args.dry_run,
+    )
+
+    total = written = 0
+    skipped: dict[str, int] = {}
+    seen_ids: set[str] = set()
+    duplicates = 0
+    max_line_bytes = CONFIG["max_line_bytes"]
+
+    def note_skip(reason: str) -> None:
+        skipped[reason] = skipped.get(reason, 0) + 1
+
+    for path in files:
+        print(f"读取 {path} …")
+        for row in READERS[fmt](path):
+            if args.limit and total >= args.limit:
+                break
+            record, reason = build_record(row, total)
+            total += 1
+            if record is None:
+                note_skip(reason)
+                continue
+
+            line = json.dumps(record, ensure_ascii=False) + "\n"
+            if max_line_bytes and len(line.encode("utf-8")) > max_line_bytes:
+                note_skip(f"单行超过 {max_line_bytes} 字节")
+                continue
+
+            if CONFIG["check_duplicate_ids"]:
+                cid = record["custom_id"]
+                if cid in seen_ids:
+                    duplicates += 1
+                else:
+                    seen_ids.add(cid)
+
+            writer.write(line)
+            written += 1
+        if args.limit and total >= args.limit:
+            break
+
+    writer.close()
+
+    print("-" * 60)
+    print(f"读取 {total} 行，写出 {written} 行")
+    if skipped:
+        print("跳过明细：")
+        for reason, count in sorted(skipped.items(), key=lambda kv: -kv[1]):
+            print(f"  {count:>8}  {reason}")
+    if duplicates:
+        print(f"[警告] 有 {duplicates} 个重复的 custom_id —— 结果将难以与原始数据一一对齐")
+    if writer.files:
+        print(f"输出目录：{out_dir}")
+        for path, rows, size in writer.files:
+            print(f"  {path.name}  {rows} 行  {human(size)}")
+    elif not args.dry_run:
+        print("[警告] 没有产出任何文件")
+
+    return 0 if written else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
