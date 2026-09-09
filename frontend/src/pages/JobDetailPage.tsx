@@ -192,15 +192,14 @@ export default function JobDetailPage() {
         {!canDownload && hasResults && !purged && !finished && (
           <Alert
             style={{ marginTop: 16 }} type="info" showIcon
-            message="任务结束后才能下载结果"
-            description="结果文件此刻仍在被写入，中途导出会拿到不完整的内容。下方「结果预览」可以随时查看已完成的部分。"
+            message="任务结束或取消后才能下载结果"
           />
         )}
         {purged && (
           <Alert
             style={{ marginTop: 16 }} type="warning" showIcon
             message="文件已超过保留期被自动清理"
-            description={`清理于 ${formatDateTime(job.files_purged_at)}。任务记录与用量统计仍然保留，但结果与输入文件已无法下载，也无法恢复或重试。`}
+            description={`清理于 ${formatDateTime(job.files_purged_at)}。文件是不可恢复的。`}
           />
         )}
         {job.error && (
@@ -224,7 +223,7 @@ export default function JobDetailPage() {
                     pagination={{
                       current: resultPage, pageSize: 20, total: resultTotal, showSizeChanger: false,
                       onChange: setResultPage,
-                      showTotal: (t) => `共 ${formatNumber(t)} 条成功结果（按完成顺序，非原始行序）`,
+                      showTotal: (t) => `共 ${formatNumber(t)} 条成功结果`,
                     }}
                   />
                 ),
