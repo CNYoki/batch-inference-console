@@ -125,6 +125,8 @@ class ModelConfigBase(BaseModel):
     supports_tools: bool = False
     reasoning_mode: Literal["off", "optional", "forced"] = "off"
     reasoning_payload: dict[str, Any] = Field(default_factory=dict)
+    reasoning_effort_options: list[str] = Field(default_factory=list, max_length=16)
+    reasoning_default_effort: str = Field(default="", max_length=32)
 
     max_concurrency: int = Field(default=8, ge=1, le=512)
     rpm_limit: int = Field(default=0, ge=0)
@@ -172,6 +174,8 @@ class ModelConfigUpdate(BaseModel):
     supports_tools: bool | None = None
     reasoning_mode: Literal["off", "optional", "forced"] | None = None
     reasoning_payload: dict[str, Any] | None = None
+    reasoning_effort_options: list[str] | None = Field(default=None, max_length=16)
+    reasoning_default_effort: str | None = Field(default=None, max_length=32)
 
     max_concurrency: int | None = Field(default=None, ge=1, le=512)
     rpm_limit: int | None = Field(default=None, ge=0)
@@ -206,6 +210,8 @@ class ModelOption(BaseModel):
     supports_system_prompt: bool
     supports_json_mode: bool
     reasoning_mode: str
+    reasoning_effort_options: list[str] = Field(default_factory=list)
+    reasoning_default_effort: str = ""
     max_concurrency: int
     max_tokens_cap: int
 
@@ -250,6 +256,8 @@ class JobParams(BaseModel):
     seed: int | None = None
     json_mode: bool = False
     reasoning: bool = False
+    # 推理档位，取值必须落在模型声明的 reasoning_effort_options 里，否则退回第一档
+    reasoning_effort: str | None = Field(default=None, max_length=32)
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -317,10 +325,11 @@ class UploadValidateOut(BaseModel):
     duplicate_custom_ids: list[str] = Field(default_factory=list)
 
 
-class JobCreate(BaseModel):
+class JobSubmission(BaseModel):
+    """建任务与试跑共用的部分：选哪个模型、用哪些参数、跑哪份上传。"""
+
     model_config = _ALLOW_MODEL_PREFIX
 
-    name: str = Field(min_length=1, max_length=255)
     upload_id: str
     # shared：用管理员配置的公用模型，需要 model_config_id
     # personal：用自己的网关 token，需要 personal_model
@@ -331,17 +340,43 @@ class JobCreate(BaseModel):
     personal_token: str | None = Field(default=None, max_length=512)
     remember_token: bool = True
     params: JobParams = Field(default_factory=JobParams)
-    concurrency: int = Field(default=0, ge=0, le=512)
-    priority: int = Field(default=100, ge=0, le=1000)
 
     @model_validator(mode="after")
-    def _check_model_selection(self) -> JobCreate:
+    def _check_model_selection(self) -> JobSubmission:
         if self.model_source == "shared":
             if not self.model_config_id:
                 raise ValueError("使用公用模型时必须指定 model_config_id")
         elif not self.personal_model:
             raise ValueError("使用个人模型时必须指定 personal_model")
         return self
+
+
+class JobCreate(JobSubmission):
+    name: str = Field(min_length=1, max_length=255)
+    concurrency: int = Field(default=0, ge=0, le=512)
+    priority: int = Field(default=100, ge=0, le=1000)
+
+
+class JobDryRun(JobSubmission):
+    """提交前的试跑请求：拿上传文件里的某一条真发一次。"""
+
+    # 默认试第一条；文件前几条可能是特例，允许换一条再试
+    item_index: int = Field(default=0, ge=0, le=999)
+
+
+class JobDryRunOut(BaseModel):
+    ok: bool
+    # 试跑用的是哪条数据、发出去的完整请求体 —— 出错时用户要靠它对照排查
+    custom_id: str | None = None
+    item_index: int = 0
+    request_body: dict[str, Any] = Field(default_factory=dict)
+    status_code: int | None = None
+    latency_ms: int = 0
+    # 成功时给正文与 token 用量，失败时给一句人话的原因 + 原始响应
+    content: str | None = None
+    usage: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+    response: dict[str, Any] | None = None
 
 
 class JobPatch(BaseModel):
@@ -460,6 +495,8 @@ class SystemSettingsOut(BaseModel):
 
     user_gateway_reasoning_enabled: bool = True
     user_gateway_reasoning_payload: dict[str, Any] = Field(default_factory=dict)
+    user_gateway_reasoning_effort_options: list[str] = Field(default_factory=list)
+    user_gateway_reasoning_default_effort: str = ""
 
     # ---- 文件保留期 ----
     file_retention_days: int = 0
@@ -517,6 +554,8 @@ class SystemSettingsUpdate(BaseModel):
     # 0 = 永久保留；上限 3650 天纯粹是防手滑输错
     user_gateway_reasoning_enabled: bool | None = None
     user_gateway_reasoning_payload: dict[str, Any] | None = None
+    user_gateway_reasoning_effort_options: list[str] | None = Field(default=None, max_length=16)
+    user_gateway_reasoning_default_effort: str | None = Field(default=None, max_length=32)
 
     file_retention_days: int | None = Field(default=None, ge=0, le=3650)
     purge_input_files: bool | None = None

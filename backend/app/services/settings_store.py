@@ -33,6 +33,11 @@ DEFAULTS: dict = {
     # OpenAI 系用 reasoning_effort），所以做成可配置的
     "user_gateway_reasoning_enabled": True,
     "user_gateway_reasoning_payload": {"enable_thinking": True},
+    # 让用户在建任务时挑档位，例 ["low", "medium", "high"]。payload 里写 "$effort"
+    # 的地方会被换成所选档位；留空则不给选，payload 原样发出
+    "user_gateway_reasoning_effort_options": [],
+    # 用户没选时用哪一档；留空则取名单第一项
+    "user_gateway_reasoning_default_effort": "",
     # ---- 文件保留期 ----
     # 终态任务（成功/完成/失败/取消）的输入与结果文件保留多少天，0 = 永久保留。
     # 到期后由 worker 自动清除文件，任务记录与统计保留。

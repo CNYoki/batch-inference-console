@@ -7,6 +7,9 @@ import type { ColumnsType } from 'antd/es/table'
 import { ApiOutlined, DeleteOutlined, EditOutlined, PlusOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import type { ModelConfig } from '../api'
+import {
+  CUSTOM_PRESET, EFFORT_LEVEL_OPTIONS, PRESET_SELECT_OPTIONS, REASONING_PRESETS, matchPreset,
+} from '../reasoning'
 
 type ProbeState = Record<string, { ok: boolean; text: string } | 'loading'>
 
@@ -41,6 +44,8 @@ export default function AdminModelsPage() {
         ...record,
         api_key: '', // 密钥不回显，留空表示不修改
         allowed_param_keys: record.allowed_param_keys ?? [],
+        reasoning_effort_options: record.reasoning_effort_options ?? [],
+        reasoning_preset: matchPreset(record.reasoning_payload, record.reasoning_effort_options),
         ...Object.fromEntries(JSON_FIELDS.map((k) => [k, JSON.stringify(record[k] ?? {}, null, 2)])),
       })
     } else {
@@ -51,9 +56,24 @@ export default function AdminModelsPage() {
         request_timeout: 300, max_retries: 3, max_tokens_cap: 0, sort_order: 0,
         default_params: '{\n  "temperature": 0.7\n}', forced_params: '{}',
         reasoning_payload: '{}', extra_headers: '{}',
+        reasoning_preset: CUSTOM_PRESET, reasoning_effort_options: [], reasoning_default_effort: '',
       })
     }
     setOpen(true)
+  }
+
+  // 「默认档位」的候选就是上面填的档位名单，跟着一起变
+  const effortOptions = Form.useWatch('reasoning_effort_options', form) as string[] | undefined
+
+  /** 选中预设后，把请求体与档位一起填进表单；选「自定义」则不动已填的内容 */
+  const applyPreset = (value: string) => {
+    const preset = REASONING_PRESETS.find((p) => p.value === value)
+    if (!preset) return
+    form.setFieldsValue({
+      reasoning_payload: JSON.stringify(preset.payload, null, 2),
+      reasoning_effort_options: [...preset.effortOptions],
+      reasoning_default_effort: preset.defaultEffort,
+    })
   }
 
   const save = async () => {
@@ -68,6 +88,8 @@ export default function AdminModelsPage() {
         return
       }
     }
+    // 预设只是填表用的快捷方式，后端只认 payload 与档位列表
+    delete payload.reasoning_preset
     // 编辑时留空表示保持原密钥不变
     if (editing && !values.api_key) delete payload.api_key
 
@@ -150,6 +172,9 @@ export default function AdminModelsPage() {
           {r.supports_json_mode && <Tag color="blue">JSON</Tag>}
           {r.reasoning_mode !== 'off' && (
             <Tag color="purple">推理{r.reasoning_mode === 'forced' ? '(强制)' : '(可选)'}</Tag>
+          )}
+          {!!r.reasoning_effort_options?.length && (
+            <Tag color="purple">档位 {r.reasoning_effort_options.join('/')}</Tag>
           )}
           {!r.supports_temperature && <Tag color="default">无 temperature</Tag>}
         </Space>
@@ -307,10 +332,30 @@ export default function AdminModelsPage() {
                   extra="留空表示不限制">
                   <Select mode="tags" placeholder="temperature, max_tokens …" />
                 </Form.Item>
+                <Form.Item name="reasoning_preset" label="推理请求体写法"
+                  extra="选一个常见写法自动填好下面两项，也可以选「自定义」自己写">
+                  <Select options={PRESET_SELECT_OPTIONS} onChange={applyPreset} />
+                </Form.Item>
                 <Form.Item name="reasoning_payload" label="开启推理时附加的请求体"
-                  extra='例：{"reasoning_effort": "medium"} 或 {"enable_thinking": true}'>
+                  extra='例：{"chat_template_kwargs": {"enable_thinking": true}}；写 "$effort" 的位置会被换成用户选的档位'>
                   <Input.TextArea rows={3} className="mono" />
                 </Form.Item>
+                <Row gutter={16}>
+                  <Col span={16}>
+                    <Form.Item name="reasoning_effort_options" label="用户可选的推理档位"
+                      extra="留空则不让用户选，请求体原样发出。列表里没有的档位可以直接输入">
+                      <Select mode="tags" options={EFFORT_LEVEL_OPTIONS}
+                        placeholder="low, medium, high" />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item name="reasoning_default_effort" label="默认档位"
+                      extra="留空则用名单第一项">
+                      <Select allowClear placeholder="不指定"
+                        options={(effortOptions ?? []).map((v: string) => ({ value: v, label: v }))} />
+                    </Form.Item>
+                  </Col>
+                </Row>
                 <Form.Item name="extra_headers" label="额外请求头">
                   <Input.TextArea rows={3} className="mono" />
                 </Form.Item>

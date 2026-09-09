@@ -191,8 +191,16 @@ class ModelConfig(Base, TimestampMixin):
     supports_tools: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # 推理（thinking / reasoning）开关：off | optional | forced
     reasoning_mode: Mapped[str] = mapped_column(String(16), default="off", nullable=False)
-    # 开启推理时附加的请求体片段，例 {"reasoning_effort": "medium"}
+    # 开启推理时附加的请求体片段，例 {"reasoning_effort": "$effort"}；
+    # 片段里任意位置的 "$effort" 会被换成用户选的档位
     reasoning_payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    # 允许用户挑选的推理档位，例 ["low", "medium", "high"]。
+    # 留空表示不让用户选，payload 原样发出
+    reasoning_effort_options: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    # 用户没选时用哪一档；留空或不在名单里就取名单第一项。
+    # 单独存而不是"取第一项"，是因为档位名单通常按强度排序，
+    # 排头的可能是 none/minimal 这种不该当默认值的档
+    reasoning_default_effort: Mapped[str] = mapped_column(String(32), default="", nullable=False)
 
     # ---- 限流 / 重试 ----
     max_concurrency: Mapped[int] = mapped_column(Integer, default=8, nullable=False)

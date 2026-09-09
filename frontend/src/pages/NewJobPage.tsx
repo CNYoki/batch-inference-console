@@ -2,17 +2,36 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Alert, App, Button, Card, Col, Collapse, Descriptions, Divider, Form, Input, InputNumber,
-  Progress, Row, Select, Slider, Space, Steps, Switch, Tag, Typography, Upload,
+  Modal, Progress, Row, Select, Slider, Space, Spin, Steps, Switch, Tag, Typography, Upload,
 } from 'antd'
 import { InboxOutlined, KeyOutlined, ReloadOutlined } from '@ant-design/icons'
 import type { UploadFile } from 'antd/es/upload/interface'
 import { api } from '../api'
-import type { ModelOption, ModelOptions, MyUsage, SystemSettings, UploadResult } from '../api'
+import type {
+  DryRunResult, ModelOption, ModelOptions, MyUsage, SystemSettings, UploadResult,
+} from '../api'
 import { formatBytes, formatNumber } from '../utils'
+import { defaultEffort, sortEfforts } from '../reasoning'
 
 const SAMPLE = `{"custom_id": "req-1", "body": {"messages": [{"role": "user", "content": "把这句话翻译成英文：珞珈山下，清风徐来。"}]}}
 {"custom_id": "req-2", "messages": [{"role": "user", "content": "总结这段文字……"}]}
 {"custom_id": "req-3", "prompt": "写一首春天的诗"}`
+
+type JobPayload = Parameters<typeof api.createJob>[0]
+
+/** 试跑弹窗的状态机：跑 → 建任务，中间任何一步失败都停在 failed 让用户决定 */
+type DryState = {
+  phase: 'running' | 'submitting' | 'failed'
+  job: JobPayload
+  error?: string
+  result?: DryRunResult
+}
+
+/** 后端 4xx 的 detail，拿不到就返回 undefined */
+function errorDetail(err: unknown): string | undefined {
+  const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+  return typeof detail === 'string' ? detail : undefined
+}
 
 /** 下拉框的值把来源编进去：shared:<配置id> / personal:<模型名> */
 type Selection = { source: 'shared' | 'personal'; key: string }
@@ -36,9 +55,33 @@ function personalCaps(settings: SystemSettings | null) {
     reasoning_mode: (settings?.user_gateway_reasoning_enabled ?? true)
       ? ('optional' as const)
       : ('off' as const),
+    reasoning_effort_options: settings?.user_gateway_reasoning_effort_options ?? [],
+    reasoning_default_effort: settings?.user_gateway_reasoning_default_effort ?? '',
     max_concurrency: settings?.user_gateway_max_concurrency ?? 0,
     max_tokens_cap: settings?.user_gateway_max_tokens_cap ?? 0,
   }
+}
+
+/**
+ * 推理档位滑动条。表单里存的是档位字符串，滑块按名单下标定位，
+ * step=null 让它只停在刻度上。
+ */
+function EffortSlider(
+  { options, value, onChange }:
+  { options: string[]; value?: string; onChange?: (v: string) => void },
+) {
+  if (options.length < 2) return <Tag color="purple">{value ?? options[0]}</Tag>
+  const index = Math.max(0, options.indexOf(value ?? ''))
+  return (
+    <Slider
+      min={0} max={options.length - 1} step={null} value={index}
+      marks={Object.fromEntries(options.map(
+        (o, i) => [i, <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{o}</span>],
+      ))}
+      tooltip={{ open: false }}
+      onChange={(v) => onChange?.(options[v as number])}
+    />
+  )
 }
 
 export default function NewJobPage() {
@@ -54,6 +97,7 @@ export default function NewJobPage() {
   const [percent, setPercent] = useState(0)
   const [upload, setUpload] = useState<UploadResult | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [dry, setDry] = useState<DryState | null>(null)
 
   // 本次会话里刚填的 token（尚未保存时，提交任务要一起带上）
   const [token, setToken] = useState('')
@@ -63,6 +107,7 @@ export default function NewJobPage() {
 
   const selectedValue = Form.useWatch('model', form) as string | undefined
   const selection = useMemo(() => parseSelection(selectedValue), [selectedValue])
+  const reasoningOn = Form.useWatch('reasoning', form) as boolean | undefined
 
   const loadOptions = useCallback(async () => {
     const data = await api.modelOptions()
@@ -85,6 +130,15 @@ export default function NewJobPage() {
   )
   // 公用模型用它自己的能力声明，个人模型用宽松默认
   const caps = selection?.source === 'personal' ? personalCaps(settings) : sharedModel
+
+  const effortOptions = useMemo(
+    () => sortEfforts(caps?.reasoning_effort_options ?? []), [caps],
+  )
+  const effortFallback = defaultEffort(effortOptions, caps?.reasoning_default_effort)
+  useEffect(() => {
+    // 换模型后档位名单可能完全不同，统一回到该模型的默认档
+    form.setFieldValue('reasoning_effort', effortFallback)
+  }, [form, effortFallback])
 
   const fetchPersonalModels = async () => {
     if (!token.trim()) {
@@ -137,6 +191,26 @@ export default function NewJobPage() {
     }
   }
 
+  /** 真正建任务；试跑通过后自动走这里，试跑失败时用户点「仍要提交」也走这里 */
+  const submitJob = async (job: JobPayload) => {
+    setSubmitting(true)
+    try {
+      const created = await api.createJob(job)
+      setDry(null)
+      message.success('任务已提交，正在排队')
+      navigate(`/jobs/${created.id}`)
+    } catch {
+      // 失败原因由拦截器提示，弹窗收掉让用户回去改
+      setDry(null)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  /**
+   * 提交前先拿第一条真发一次。整批排完队再报错太亏，
+   * 模型名、密钥、推理字段、max_tokens 这些坑在这一步就能暴露。
+   */
   const onSubmit = async () => {
     const values = await form.validateFields()
     if (!upload || upload.errors.length) {
@@ -149,36 +223,53 @@ export default function NewJobPage() {
       return
     }
 
-    setSubmitting(true)
+    let extra: Record<string, unknown>
     try {
-      const job = await api.createJob({
-        name: values.name,
-        upload_id: upload.upload_id,
-        model_source: picked.source,
-        model_config_id: picked.source === 'shared' ? picked.key : null,
-        personal_model: picked.source === 'personal' ? picked.key : null,
-        // token 已保存过就不必再传；刚填的则随任务带上
-        personal_token: picked.source === 'personal' && token.trim() ? token.trim() : null,
-        remember_token: rememberToken,
-        concurrency: values.concurrency ?? 0,
-        priority: values.priority ?? 100,
-        params: {
-          system_prompt: values.system_prompt || null,
-          temperature: values.temperature,
-          top_p: values.top_p,
-          max_tokens: values.max_tokens,
-          seed: values.seed,
-          json_mode: !!values.json_mode,
-          reasoning: !!values.reasoning,
-          extra: values.extra ? JSON.parse(values.extra) : {},
-        },
-      })
-      message.success('任务已提交，正在排队')
-      navigate(`/jobs/${job.id}`)
+      extra = values.extra ? JSON.parse(values.extra) : {}
+    } catch {
+      message.error('「附加参数」不是合法 JSON')
+      return
+    }
+
+    const job: JobPayload = {
+      name: values.name,
+      upload_id: upload.upload_id,
+      model_source: picked.source,
+      model_config_id: picked.source === 'shared' ? picked.key : null,
+      personal_model: picked.source === 'personal' ? picked.key : null,
+      // token 已保存过就不必再传；刚填的则随任务带上
+      personal_token: picked.source === 'personal' && token.trim() ? token.trim() : null,
+      remember_token: rememberToken,
+      concurrency: values.concurrency ?? 0,
+      priority: values.priority ?? 100,
+      params: {
+        system_prompt: values.system_prompt || null,
+        temperature: values.temperature,
+        top_p: values.top_p,
+        max_tokens: values.max_tokens,
+        seed: values.seed,
+        json_mode: !!values.json_mode,
+        reasoning: !!values.reasoning,
+        reasoning_effort: values.reasoning_effort || null,
+        extra,
+      },
+    }
+
+    setDry({ phase: 'running', job })
+    try {
+      // 试跑用的就是这份 job 里的模型与参数，只是不带 name / 并发 / 优先级
+      const res = await api.dryRunJob(job)
+      if (!res.ok) {
+        setDry({ phase: 'failed', job, error: res.error || '试跑失败', result: res })
+        return
+      }
+      setDry({ phase: 'submitting', job, result: res })
+      await submitJob(job)
     } catch (err) {
-      if (err instanceof SyntaxError) message.error('「附加参数」不是合法 JSON')
-    } finally {
-      setSubmitting(false)
+      setDry({
+        phase: 'failed', job,
+        error: errorDetail(err) || '试跑请求没能发出去，请检查网络或后端服务',
+      })
     }
   }
 
@@ -471,6 +562,13 @@ export default function NewJobPage() {
                 {caps?.reasoning_mode === 'forced' && <Tag color="purple">该模型始终开启深度推理</Tag>}
               </Space>
 
+              {!!effortOptions.length && (caps?.reasoning_mode === 'forced' || reasoningOn) && (
+                <Form.Item name="reasoning_effort" label="推理档位"
+                  style={{ maxWidth: 480, marginBottom: 16 }}>
+                  <EffortSlider options={effortOptions} />
+                </Form.Item>
+              )}
+
               <Collapse
                 size="small"
                 items={[{
@@ -507,6 +605,85 @@ export default function NewJobPage() {
           </Form>
         </Col>
       </Row>
+
+      <Modal
+        open={!!dry}
+        title="提交前试跑"
+        width={720}
+        maskClosable={false}
+        // 跑的过程中不给关，免得任务提交到一半界面已经跳走
+        closable={dry?.phase === 'failed'}
+        onCancel={() => setDry(null)}
+        footer={dry?.phase === 'failed' ? [
+          <Button key="back" type="primary" onClick={() => setDry(null)}>返回修改</Button>,
+          <Button key="force" danger loading={submitting}
+            onClick={() => dry && void submitJob(dry.job)}>
+            仍要提交
+          </Button>,
+        ] : null}
+      >
+        {dry?.phase !== 'failed' ? (
+          <Space direction="vertical" size={12} style={{ width: '100%', padding: '8px 0' }}>
+            <Space size={10}>
+              <Spin size="small" />
+              {dry?.phase === 'submitting'
+                ? '试跑通过，正在提交任务…'
+                : '正在用你选的模型真发第 1 条，通过了才会提交任务'}
+            </Space>
+            {dry?.result?.content && (
+              <Alert
+                type="success" showIcon
+                message={`模型已回复（${dry.result.latency_ms} ms）`}
+                description={
+                  <div style={{ maxHeight: 160, overflow: 'auto', whiteSpace: 'pre-wrap' }}>
+                    {dry.result.content}
+                  </div>
+                }
+              />
+            )}
+          </Space>
+        ) : (
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            <Alert type="error" showIcon message="试跑没通过，任务还没有提交"
+              description={dry.error} />
+            {dry.result && (
+              <Descriptions size="small" column={2} bordered>
+                <Descriptions.Item label="试的是哪条">
+                  {dry.result.custom_id || `第 ${dry.result.item_index + 1} 条`}
+                </Descriptions.Item>
+                <Descriptions.Item label="HTTP 状态">
+                  {dry.result.status_code ?? '未收到响应'}
+                </Descriptions.Item>
+              </Descriptions>
+            )}
+            {dry.result && (
+              <Collapse size="small" items={[
+                {
+                  key: 'req',
+                  label: '实际发出的请求体',
+                  children: (
+                    <pre className="mono" style={{ margin: 0, maxHeight: 240, overflow: 'auto' }}>
+                      {JSON.stringify(dry.result.request_body, null, 2)}
+                    </pre>
+                  ),
+                },
+                ...(dry.result.response ? [{
+                  key: 'resp',
+                  label: '网关原始响应',
+                  children: (
+                    <pre className="mono" style={{ margin: 0, maxHeight: 240, overflow: 'auto' }}>
+                      {JSON.stringify(dry.result.response, null, 2)}
+                    </pre>
+                  ),
+                }] : []),
+              ]} />
+            )}
+            <Typography.Text type="secondary">
+              改完参数再点一次「提交任务」会重新试跑。如果只是网关抖了一下，也可以直接「仍要提交」。
+            </Typography.Text>
+          </Space>
+        )}
+      </Modal>
     </Space>
   )
 }

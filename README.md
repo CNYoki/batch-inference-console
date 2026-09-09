@@ -25,6 +25,9 @@ Browser ──► API (FastAPI) ──► MySQL / PostgreSQL   (metadata, state)
 - Pause / resume / cancel, and **item-level checkpointing**: resuming a job re-sends only the
   requests that never completed
 - Retry just the failed items without re-running the successful ones
+- **Dry run on submit**: the first line is sent for real before the job is queued, so a wrong
+  model name, an expired key or a reasoning field the gateway rejects surfaces in seconds
+  instead of after the whole batch has waited in line
 - Live progress, failure details, result preview, and export as raw JSONL, simplified JSONL, or CSV
 
 **Models**
@@ -32,7 +35,10 @@ Browser ──► API (FastAPI) ──► MySQL / PostgreSQL   (metadata, state)
   parameters, allow-list of user-overridable keys, concurrency / RPM / TPM limits, retries
 - **Personal gateway**: users supply their own token, the platform fetches the models that token
   is authorised for, and jobs run under their identity and quota
-- Reasoning/thinking toggle per model, with a configurable request-body fragment
+- Reasoning/thinking toggle per model: pick the request-body fragment from presets
+  (`chat_template_kwargs.enable_thinking`, `reasoning_effort`, `thinking.budget_tokens`, …)
+  or write your own; effort levels (`none` … `max`, or raw token budgets) are configurable
+  per model and picked by users on a slider when creating a job
 
 **Operations**
 - Storage quotas, global and per user, enforced during upload

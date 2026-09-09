@@ -673,3 +673,136 @@ async def test_split_script_requires_login(client: AsyncClient):
     assert (await client.post("/api/tools/split-script", json={
         "source_path": "/x", "prompt_template": "t"
     })).status_code == 401
+
+
+# --------------------------------------------------------------------------- #
+# 提交前试跑一条
+# --------------------------------------------------------------------------- #
+def _fake_inference(monkeypatch, result: dict) -> dict:
+    """替换 jobs 模块里的 InferenceClient，返回捕获到的请求体。"""
+    captured: dict = {}
+
+    class FakeClient:
+        def __init__(self, mc):
+            captured["model_name"] = mc.model_name
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+        async def try_once(self, body):
+            captured["body"] = body
+            return result
+
+    import app.api.jobs as jobs_mod
+    monkeypatch.setattr(jobs_mod, "InferenceClient", FakeClient)
+    return captured
+
+
+async def _model_and_upload(admin_client: AsyncClient, name: str, content: str) -> tuple[str, str]:
+    model = (await admin_client.post("/api/admin/models", json={
+        "name": name, "display_name": name, "base_url": "http://x/v1", "model_name": "real-model",
+        "reasoning_mode": "optional", "reasoning_payload": {"reasoning_effort": "$effort"},
+        "reasoning_effort_options": ["none", "low", "medium", "high"],
+        "reasoning_default_effort": "medium",
+    })).json()
+    upload = (await admin_client.post(
+        "/api/jobs/upload",
+        files={"file": (f"{name}.jsonl", content.encode("utf-8"), "application/json")},
+    )).json()
+    return model["id"], upload["upload_id"]
+
+
+@pytest.mark.asyncio
+async def test_dry_run_sends_the_real_body_and_reports_success(
+    admin_client: AsyncClient, monkeypatch
+):
+    """试跑要和正式跑用同一套拼装逻辑，否则试了也白试。"""
+    model_id, upload_id = await _model_and_upload(
+        admin_client, "dryrun-ok",
+        json.dumps({"custom_id": "first", "prompt": "你好"}, ensure_ascii=False) + "\n",
+    )
+    captured = _fake_inference(monkeypatch, {
+        "ok": True, "status_code": 200, "latency_ms": 42,
+        "content": "你好呀", "usage": {"prompt_tokens": 3, "completion_tokens": 5},
+        "response": {"choices": []},
+    })
+
+    resp = await admin_client.post("/api/jobs/dry-run", json={
+        "upload_id": upload_id, "model_config_id": model_id,
+        "params": {"system_prompt": "你是助手", "reasoning": True, "reasoning_effort": "high"},
+    })
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["ok"] and data["custom_id"] == "first" and data["content"] == "你好呀"
+
+    body = captured["body"]
+    assert body["model"] == "real-model"
+    assert body["messages"][0] == {"role": "system", "content": "你是助手"}
+    # 用户选的推理档位要真的出现在试跑请求里
+    assert body["reasoning_effort"] == "high"
+    # 试跑不写请求体里的控制键
+    assert "reasoning" not in body and "_system_prompt" not in body
+
+
+@pytest.mark.asyncio
+async def test_dry_run_returns_failure_reason_instead_of_500(
+    admin_client: AsyncClient, monkeypatch
+):
+    """网关报错要原样带回给用户看，接口本身仍是 200。"""
+    model_id, upload_id = await _model_and_upload(
+        admin_client, "dryrun-fail",
+        json.dumps({"custom_id": "a", "prompt": "hi"}) + "\n",
+    )
+    _fake_inference(monkeypatch, {
+        "ok": False, "status_code": 400, "latency_ms": 12,
+        "error": "HTTP 400: model does not support enable_thinking",
+        "response": {"error": {"message": "model does not support enable_thinking"}},
+    })
+
+    resp = await admin_client.post("/api/jobs/dry-run", json={
+        "upload_id": upload_id, "model_config_id": model_id,
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is False and "enable_thinking" in data["error"]
+    # 请求体一并回传，用户才知道到底发出去了什么
+    assert data["request_body"]["model"] == "real-model"
+
+
+@pytest.mark.asyncio
+async def test_dry_run_rejects_bad_line_and_stale_upload(admin_client: AsyncClient, monkeypatch):
+    _fake_inference(monkeypatch, {"ok": True})
+    model_id, upload_id = await _model_and_upload(admin_client, "dryrun-bad", "{ 坏行\n")
+
+    resp = await admin_client.post("/api/jobs/dry-run", json={
+        "upload_id": upload_id, "model_config_id": model_id,
+    })
+    assert resp.status_code == 400 and "第 1 行" in resp.json()["detail"]
+
+    stale = await admin_client.post("/api/jobs/dry-run", json={
+        "upload_id": "0" * 32, "model_config_id": model_id,
+    })
+    assert stale.status_code == 400 and "上传已失效" in stale.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_dry_run_does_not_create_a_job(admin_client: AsyncClient, monkeypatch):
+    """试跑不落盘、不建任务 —— 上传还在暂存区，后面照样能正常提交。"""
+    before = (await admin_client.get("/api/jobs")).json()["total"]
+    model_id, upload_id = await _model_and_upload(
+        admin_client, "dryrun-nojob", json.dumps({"prompt": "hi"}) + "\n",
+    )
+    _fake_inference(monkeypatch, {"ok": True, "status_code": 200, "latency_ms": 1})
+    await admin_client.post("/api/jobs/dry-run", json={
+        "upload_id": upload_id, "model_config_id": model_id,
+    })
+    assert (await admin_client.get("/api/jobs")).json()["total"] == before
+
+    # 同一个 upload_id 试跑完还能继续用
+    again = await admin_client.post("/api/jobs/dry-run", json={
+        "upload_id": upload_id, "model_config_id": model_id,
+    })
+    assert again.status_code == 200

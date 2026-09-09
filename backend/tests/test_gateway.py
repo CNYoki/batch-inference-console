@@ -167,6 +167,23 @@ def test_admin_can_customize_reasoning_payload():
     assert resolve_params(mc, {"reasoning": True}) == {"reasoning_effort": "high"}
 
 
+def test_personal_model_effort_options_come_from_settings():
+    """网关的推理档位由后台配置，用户在建任务时挑一个。"""
+    from app.services.inference import resolve_params
+
+    mc = build_personal_config("m", "sk", {
+        **DEFAULTS,
+        "user_gateway_reasoning_payload": {"reasoning_effort": "$effort"},
+        "user_gateway_reasoning_effort_options": ["low", "medium", "high"],
+    })
+    assert mc.reasoning_effort_options == ["low", "medium", "high"]
+    assert resolve_params(mc, {"reasoning": True, "reasoning_effort": "high"}) == {
+        "reasoning_effort": "high",
+    }
+    # 没选档位就用第一档
+    assert resolve_params(mc, {"reasoning": True}) == {"reasoning_effort": "low"}
+
+
 def test_admin_can_disable_reasoning_toggle_entirely():
     from app.services.inference import resolve_params
 

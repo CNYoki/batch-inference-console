@@ -1,6 +1,13 @@
 import axios from 'axios'
 import { message } from 'antd'
 
+declare module 'axios' {
+  export interface AxiosRequestConfig {
+    /** 调用方自己在界面上展示错误时置 true，拦截器就不再弹 toast */
+    skipErrorToast?: boolean
+  }
+}
+
 export const http = axios.create({
   baseURL: '/api',
   withCredentials: true,   // 会话是 httpOnly Cookie
@@ -17,6 +24,7 @@ http.interceptors.response.use(
       location.href = '/login'
       return Promise.reject(error)
     }
+    if (error.config?.skipErrorToast) return Promise.reject(error)
     if (detail && typeof detail === 'string') {
       message.error(detail)
     } else if (status) {
