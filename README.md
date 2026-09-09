@@ -39,6 +39,8 @@ Browser ──► API (FastAPI) ──► MySQL / PostgreSQL   (metadata, state)
   (`chat_template_kwargs.enable_thinking`, `reasoning_effort`, `thinking.budget_tokens`, …)
   or write your own; effort levels (`none` … `max`, or raw token budgets) are configurable
   per model and picked by users on a slider when creating a job
+- Personal-gateway models aren't in the database, so their reasoning config is matched by model
+  name (`qwen3-*`, first rule wins) with a gateway-wide default behind it
 
 **Operations**
 - Storage quotas, global and per user, enforced during upload

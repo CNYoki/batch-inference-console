@@ -75,11 +75,30 @@ export interface ModelOptions {
   gateway_base_url: string
   has_saved_token: boolean
   personal_error?: string | null
+  /** 模型名 -> 推理能力 */
+  personal_reasoning: Record<string, PersonalReasoningCap>
 }
 
 export interface PersonalModels {
   models: string[]
   saved: boolean
+  reasoning: Record<string, PersonalReasoningCap>
+}
+
+/** 个人模型的推理能力，由后端按网关规则算好 */
+export interface PersonalReasoningCap {
+  reasoning_mode: 'off' | 'optional'
+  effort_options: string[]
+  default_effort: string
+}
+
+/** 个人网关里按模型名生效的推理配置；pattern 支持 * 通配 */
+export interface GatewayReasoningRule {
+  pattern: string
+  enabled: boolean
+  payload: Record<string, unknown>
+  effort_options: string[]
+  default_effort: string
 }
 
 export interface Job {
@@ -197,6 +216,7 @@ export interface SystemSettings {
   user_gateway_reasoning_payload: Record<string, unknown>
   user_gateway_reasoning_effort_options: string[]
   user_gateway_reasoning_default_effort: string
+  user_gateway_reasoning_rules: GatewayReasoningRule[]
 
   file_retention_days: number
   purge_input_files: boolean

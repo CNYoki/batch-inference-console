@@ -382,6 +382,43 @@ async def test_personal_models_saved_token_never_returned_in_clear(
 
 
 @pytest.mark.asyncio
+async def test_personal_reasoning_caps_follow_model_name_rules(
+    admin_client: AsyncClient, monkeypatch
+):
+    """个人模型不入库，推理能力得由后端按规则现算了给前端。"""
+    await _enable_gateway(admin_client)
+    _fake_gateway(monkeypatch, models=("qwen3-32b", "gpt-oss-120b", "legacy-instruct"))
+    await admin_client.patch("/api/admin/settings", json={
+        "user_gateway_reasoning_rules": [
+            {"pattern": "qwen3-*",
+             "payload": {"chat_template_kwargs": {"enable_thinking": True}}},
+            {"pattern": "gpt-oss-*", "payload": {"reasoning_effort": "$effort"},
+             "effort_options": ["low", "medium", "high"], "default_effort": "medium"},
+            {"pattern": "*-instruct", "enabled": False},
+        ],
+    })
+
+    resp = (await admin_client.post(
+        "/api/models/personal", json={"token": "sk-token", "remember": True}
+    )).json()
+    caps = resp["reasoning"]
+    assert caps["qwen3-32b"] == {
+        "reasoning_mode": "optional", "effort_options": [], "default_effort": "",
+    }
+    assert caps["gpt-oss-120b"]["effort_options"] == ["low", "medium", "high"]
+    assert caps["gpt-oss-120b"]["default_effort"] == "medium"
+    # 规则里关掉的模型，前端连推理开关都不显示
+    assert caps["legacy-instruct"]["reasoning_mode"] == "off"
+
+    # 新建任务页那条接口也要带上同一份能力
+    options = (await admin_client.get("/api/models/options")).json()
+    assert options["personal_reasoning"]["gpt-oss-120b"]["default_effort"] == "medium"
+
+    # 收尾：规则是全站配置，别影响后面的用例
+    await admin_client.patch("/api/admin/settings", json={"user_gateway_reasoning_rules": []})
+
+
+@pytest.mark.asyncio
 async def test_model_options_reports_gateway_failure_without_500(
     admin_client: AsyncClient, monkeypatch
 ):

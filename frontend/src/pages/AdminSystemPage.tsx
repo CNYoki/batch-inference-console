@@ -20,6 +20,16 @@ type UsageRow = {
   prompt_tokens: number; completion_tokens: number; storage_bytes: number
 }
 
+/** 推理规则在表单里的形态：payload 是 JSON 文本，preset 只用于填表 */
+type RuleForm = {
+  pattern: string
+  enabled?: boolean
+  payload?: string
+  effort_options?: string[]
+  default_effort?: string
+  preset?: string
+}
+
 /** 表单里的 JSON 文本框：空串按 {} 处理，非法 JSON 抛出让上层提示 */
 function parseJson(text: unknown): Record<string, unknown> {
   if (typeof text !== 'string' || !text.trim()) return {}
@@ -62,11 +72,33 @@ export default function AdminSystemPage() {
         user_gateway_reasoning_preset: matchPreset(
           s.user_gateway_reasoning_payload, s.user_gateway_reasoning_effort_options,
         ),
+        user_gateway_reasoning_rules: (s.user_gateway_reasoning_rules ?? []).map((r) => ({
+          ...r,
+          payload: JSON.stringify(r.payload ?? {}, null, 2),
+          preset: matchPreset(r.payload, r.effort_options),
+        })),
       })
     }).catch(() => undefined)
   }, [load, form])
 
   usePolling(() => void load(), 5000)
+
+  // 规则表格里每一行的原始值：payload 在表单里是文本，提交前才转成对象
+  const rules = Form.useWatch('user_gateway_reasoning_rules', form) as RuleForm[] | undefined
+
+  /** 某一行选中预设后，把这行的请求体与档位一起填好 */
+  const applyRulePreset = (index: number, value: string) => {
+    const preset = REASONING_PRESETS.find((p) => p.value === value)
+    if (!preset) return
+    const next = [...(form.getFieldValue('user_gateway_reasoning_rules') ?? [])]
+    next[index] = {
+      ...next[index],
+      payload: JSON.stringify(preset.payload, null, 2),
+      effort_options: [...preset.effortOptions],
+      default_effort: preset.defaultEffort,
+    }
+    form.setFieldValue('user_gateway_reasoning_rules', next)
+  }
 
   // 「默认档位」的候选就是上面填的档位名单
   const gatewayEfforts = Form.useWatch(
@@ -108,6 +140,16 @@ export default function AdminSystemPage() {
         user_gateway_reasoning_payload: parseJson(values.user_gateway_reasoning_payload),
         user_gateway_reasoning_effort_options: values.user_gateway_reasoning_effort_options ?? [],
         user_gateway_reasoning_default_effort: values.user_gateway_reasoning_default_effort ?? '',
+        // preset 只是填表用的，不提交；模型名留空的行直接丢掉
+        user_gateway_reasoning_rules: (values.user_gateway_reasoning_rules ?? [])
+          .filter((r: RuleForm) => r?.pattern?.trim())
+          .map((r: RuleForm) => ({
+            pattern: r.pattern.trim(),
+            enabled: r.enabled !== false,
+            payload: parseJson(r.payload),
+            effort_options: r.effort_options ?? [],
+            default_effort: r.default_effort ?? '',
+          })),
         smtp_enabled: values.smtp_enabled,
         smtp_host: values.smtp_host,
         smtp_port: values.smtp_port,
@@ -134,10 +176,17 @@ export default function AdminSystemPage() {
         user_gateway_reasoning_preset: matchPreset(
           s.user_gateway_reasoning_payload, s.user_gateway_reasoning_effort_options,
         ),
+        user_gateway_reasoning_rules: (s.user_gateway_reasoning_rules ?? []).map((r) => ({
+          ...r,
+          payload: JSON.stringify(r.payload ?? {}, null, 2),
+          preset: matchPreset(r.payload, r.effort_options),
+        })),
       })
       message.success('设置已保存')
     } catch (err) {
-      if (err instanceof SyntaxError) message.error('推理参数不是合法 JSON')
+      if (err instanceof SyntaxError) {
+        message.error('推理请求体不是合法 JSON，请检查默认配置与下面的模型规则')
+      }
       // 其余错误由拦截器提示
     } finally {
       setSaving(false)
@@ -273,7 +322,7 @@ export default function AdminSystemPage() {
       </Row>
 
       <Card title="个人网关（用户自带 token）">
-        <Form form={form} layout="vertical" style={{ maxWidth: 720 }}>
+        <Form form={form} layout="vertical" style={{ maxWidth: 1000 }}>
           <Typography.Paragraph type="secondary">
             开启后，用户可在「新建任务」页填写自己的网关 token，拉取本人有权限的模型并以自己的额度跑任务。
             管理员配置的模型会标注「公用」，两者可以混用。
@@ -332,6 +381,64 @@ export default function AdminSystemPage() {
                 options={(gatewayEfforts ?? []).map((v: string) => ({ value: v, label: v }))} />
             </Form.Item>
           </Space>
+
+          <Divider orientation="left" plain>按模型名的推理配置</Divider>
+          <Typography.Paragraph type="secondary">
+            同一个网关上不同系列模型的开法不一样，可以按模型名单独配。
+            模型名支持 <code>*</code> 通配（例 <code>qwen3-*</code>），
+            <b>按顺序取第一条命中的</b>；都没命中就用上面那份默认配置。
+          </Typography.Paragraph>
+          <Form.List name="user_gateway_reasoning_rules">
+            {(fields, { add, remove }) => (
+              <>
+                {fields.map(({ key, name, ...rest }) => (
+                  <div key={key} style={{
+                    border: '1px solid rgba(128,128,128,.25)', borderRadius: 8,
+                    padding: '12px 16px 0', marginBottom: 12,
+                  }}>
+                    <Space size={24} align="start" wrap>
+                      <Form.Item {...rest} name={[name, 'pattern']} label="模型名"
+                        rules={[{ required: true, message: '填模型名或通配符' }]}>
+                        <Input className="mono" placeholder="qwen3-*" style={{ width: 200 }} />
+                      </Form.Item>
+                      <Form.Item {...rest} name={[name, 'enabled']} label="支持推理"
+                        valuePropName="checked"
+                        extra="关掉表示这些模型不支持，用户看不到开关">
+                        <Switch />
+                      </Form.Item>
+                      <Form.Item {...rest} name={[name, 'preset']} label="请求体写法">
+                        <Select options={PRESET_SELECT_OPTIONS} style={{ width: 300 }}
+                          onChange={(v) => applyRulePreset(name, v)} />
+                      </Form.Item>
+                      <Form.Item label=" " colon={false}>
+                        <Button danger onClick={() => remove(name)}>删除</Button>
+                      </Form.Item>
+                    </Space>
+                    <Space size={24} align="start" wrap>
+                      <Form.Item {...rest} name={[name, 'payload']} label="开启推理时附加的请求参数">
+                        <Input.TextArea rows={3} className="mono" style={{ width: 380 }}
+                          placeholder="{}" />
+                      </Form.Item>
+                      <Form.Item {...rest} name={[name, 'effort_options']} label="用户可选的推理档位">
+                        <Select mode="tags" options={EFFORT_LEVEL_OPTIONS}
+                          placeholder="low, medium, high" style={{ width: 240 }} />
+                      </Form.Item>
+                      <Form.Item {...rest} name={[name, 'default_effort']} label="默认档位">
+                        <Select allowClear placeholder="不指定" style={{ width: 140 }}
+                          options={(rules?.[name]?.effort_options ?? [])
+                            .map((v) => ({ value: v, label: v }))} />
+                      </Form.Item>
+                    </Space>
+                  </div>
+                ))}
+                <Button type="dashed" onClick={() => add({ enabled: true, payload: '{}' })}
+                  style={{ marginBottom: 16 }}>
+                  + 添加模型规则
+                </Button>
+              </>
+            )}
+          </Form.List>
+
           <Button type="primary" loading={saving} onClick={() => void saveSettings()}>保存网关设置</Button>
         </Form>
       </Card>

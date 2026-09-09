@@ -17,14 +17,28 @@ from ..schemas import (
     ModelOption,
     ModelOptionsOut,
     PersonalModelsOut,
+    PersonalReasoningCap,
     PersonalTokenIn,
     ProbeResult,
 )
-from ..services.gateway import GatewayError, fetch_models
+from ..services.gateway import GatewayError, fetch_models, resolve_reasoning
 from ..services.inference import InferenceClient, InferenceError
 from ..services.settings_store import read_runtime
 
 router = APIRouter(tags=["models"])
+
+
+def _personal_reasoning(models: list[str], runtime: dict) -> dict[str, PersonalReasoningCap]:
+    """按网关规则给每个个人模型算一份推理能力，前端照着渲染开关和档位。"""
+    out: dict[str, PersonalReasoningCap] = {}
+    for name in models:
+        cfg = resolve_reasoning(name, runtime)
+        out[name] = PersonalReasoningCap(
+            reasoning_mode="optional" if cfg["enabled"] else "off",
+            effort_options=cfg["effort_options"],
+            default_effort=cfg["default_effort"],
+        )
+    return out
 
 
 def _to_out(mc: ModelConfig) -> ModelConfigOut:
@@ -80,6 +94,8 @@ async def list_model_options(user: CurrentUser, db: DB) -> ModelOptionsOut:
         out.personal = await fetch_models(runtime["user_gateway_base_url"], token)
     except GatewayError as exc:
         out.personal_error = exc.message
+    else:
+        out.personal_reasoning = _personal_reasoning(out.personal, runtime)
     return out
 
 
@@ -103,7 +119,9 @@ async def list_personal_models(payload: PersonalTokenIn, user: CurrentUser, db: 
         await db.commit()
         saved = True
 
-    return PersonalModelsOut(models=models, saved=saved)
+    return PersonalModelsOut(
+        models=models, saved=saved, reasoning=_personal_reasoning(models, runtime),
+    )
 
 
 @router.delete("/models/personal/token", status_code=status.HTTP_204_NO_CONTENT)

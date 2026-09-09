@@ -195,6 +195,29 @@ class ModelConfigOut(ModelConfigBase):
     updated_at: datetime
 
 
+class GatewayReasoningRule(BaseModel):
+    """个人网关里按模型名生效的推理配置。
+
+    个人模型不在库里，只能靠模型名匹配 —— pattern 支持 * 通配，
+    例如 qwen3-* 一条就能覆盖同系列所有模型。按顺序取第一条命中的规则。
+    """
+
+    pattern: str = Field(min_length=1, max_length=255)
+    # 关掉表示这些模型不支持推理，新建任务页连开关都不显示
+    enabled: bool = True
+    payload: dict[str, Any] = Field(default_factory=dict)
+    effort_options: list[str] = Field(default_factory=list, max_length=16)
+    default_effort: str = Field(default="", max_length=32)
+
+
+class PersonalReasoningCap(BaseModel):
+    """个人模型的推理能力声明，由后端按规则算好给前端用。"""
+
+    reasoning_mode: Literal["off", "optional"] = "optional"
+    effort_options: list[str] = Field(default_factory=list)
+    default_effort: str = ""
+
+
 class ModelOption(BaseModel):
     """给普通用户的精简视图，不含端点与密钥。"""
 
@@ -221,6 +244,8 @@ class ModelOptionsOut(BaseModel):
 
     shared: list[ModelOption] = Field(default_factory=list)
     personal: list[str] = Field(default_factory=list)
+    # 模型名 -> 推理能力；个人模型不入库，能力只能在这里现算
+    personal_reasoning: dict[str, PersonalReasoningCap] = Field(default_factory=dict)
     gateway_enabled: bool = True
     gateway_label: str = "个人网关"
     gateway_base_url: str = ""
@@ -238,6 +263,7 @@ class PersonalTokenIn(BaseModel):
 class PersonalModelsOut(BaseModel):
     models: list[str]
     saved: bool = False
+    reasoning: dict[str, PersonalReasoningCap] = Field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #
@@ -497,6 +523,8 @@ class SystemSettingsOut(BaseModel):
     user_gateway_reasoning_payload: dict[str, Any] = Field(default_factory=dict)
     user_gateway_reasoning_effort_options: list[str] = Field(default_factory=list)
     user_gateway_reasoning_default_effort: str = ""
+    # 按模型名覆盖上面那份默认配置，先命中先生效
+    user_gateway_reasoning_rules: list[GatewayReasoningRule] = Field(default_factory=list)
 
     # ---- 文件保留期 ----
     file_retention_days: int = 0
@@ -556,6 +584,9 @@ class SystemSettingsUpdate(BaseModel):
     user_gateway_reasoning_payload: dict[str, Any] | None = None
     user_gateway_reasoning_effort_options: list[str] | None = Field(default=None, max_length=16)
     user_gateway_reasoning_default_effort: str | None = Field(default=None, max_length=32)
+    user_gateway_reasoning_rules: list[GatewayReasoningRule] | None = Field(
+        default=None, max_length=50
+    )
 
     file_retention_days: int | None = Field(default=None, ge=0, le=3650)
     purge_input_files: bool | None = None
