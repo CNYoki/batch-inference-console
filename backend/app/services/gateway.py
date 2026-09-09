@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+from fnmatch import fnmatch
 from typing import Any
 
 import httpx
@@ -105,6 +106,40 @@ def _parse_models(payload: Any) -> list[str]:
     return sorted(out)
 
 
+def resolve_reasoning(model_name: str, runtime: dict) -> dict:
+    """挑出该模型该用哪份推理配置。
+
+    先按顺序找命中的模型名规则，没命中就用网关的默认配置 ——
+    同一个网关上 Qwen3 和 GPT-OSS 的开法不一样，只有一份全局配置不够用。
+    """
+    default = {
+        "enabled": bool(runtime.get("user_gateway_reasoning_enabled", True)),
+        "payload": dict(
+            runtime.get("user_gateway_reasoning_payload")
+            or DEFAULTS["user_gateway_reasoning_payload"]
+        ),
+        "effort_options": [
+            str(o) for o in (runtime.get("user_gateway_reasoning_effort_options") or [])
+        ],
+        "default_effort": str(runtime.get("user_gateway_reasoning_default_effort") or ""),
+    }
+    # 整个开关被管理员关掉时，规则也不必再看
+    if not default["enabled"]:
+        return default
+
+    for rule in runtime.get("user_gateway_reasoning_rules") or []:
+        pattern = str(rule.get("pattern") or "")
+        if not pattern or not fnmatch(model_name, pattern):
+            continue
+        return {
+            "enabled": bool(rule.get("enabled", True)),
+            "payload": dict(rule.get("payload") or {}),
+            "effort_options": [str(o) for o in (rule.get("effort_options") or [])],
+            "default_effort": str(rule.get("default_effort") or ""),
+        }
+    return default
+
+
 def build_personal_config(model_name: str, token: str, runtime: dict) -> ModelConfig:
     """为个人 token 任务拼一个「虚拟」模型配置。
 
@@ -113,6 +148,7 @@ def build_personal_config(model_name: str, token: str, runtime: dict) -> ModelCo
     """
     from ..core.security import encrypt_secret
 
+    reasoning = resolve_reasoning(model_name, runtime)
     return ModelConfig(
         name=f"__personal__:{model_name}",
         display_name=model_name,
@@ -133,17 +169,10 @@ def build_personal_config(model_name: str, token: str, runtime: dict) -> ModelCo
         supports_tools=False,
         # 默认允许用户自行开关推理；开关本身默认关闭（JobParams.reasoning 默认 False），
         # 只有用户主动打开时才会把 reasoning_payload 合进请求体
-        reasoning_mode=(
-            "optional" if runtime.get("user_gateway_reasoning_enabled", True) else "off"
-        ),
-        reasoning_payload=dict(
-            runtime.get("user_gateway_reasoning_payload")
-            or DEFAULTS["user_gateway_reasoning_payload"]
-        ),
-        reasoning_effort_options=[
-            str(o) for o in (runtime.get("user_gateway_reasoning_effort_options") or [])
-        ],
-        reasoning_default_effort=str(runtime.get("user_gateway_reasoning_default_effort") or ""),
+        reasoning_mode="optional" if reasoning["enabled"] else "off",
+        reasoning_payload=reasoning["payload"],
+        reasoning_effort_options=reasoning["effort_options"],
+        reasoning_default_effort=reasoning["default_effort"],
         max_concurrency=int(runtime.get("user_gateway_max_concurrency") or 4),
         rpm_limit=0,
         tpm_limit=0,

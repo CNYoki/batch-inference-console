@@ -184,6 +184,84 @@ def test_personal_model_effort_options_come_from_settings():
     assert resolve_params(mc, {"reasoning": True}) == {"reasoning_effort": "low"}
 
 
+# --------------------------------------------------------------------------- #
+# 按模型名的推理规则
+# --------------------------------------------------------------------------- #
+_RULES = {
+    **DEFAULTS,
+    "user_gateway_reasoning_payload": {"enable_thinking": True},
+    "user_gateway_reasoning_effort_options": [],
+    "user_gateway_reasoning_rules": [
+        {
+            "pattern": "qwen3-*",
+            "payload": {"chat_template_kwargs": {"enable_thinking": True}},
+            "effort_options": [],
+        },
+        {
+            "pattern": "gpt-oss-*",
+            "payload": {"reasoning_effort": "$effort"},
+            "effort_options": ["low", "medium", "high"],
+            "default_effort": "medium",
+        },
+        {"pattern": "*-instruct", "enabled": False},
+    ],
+}
+
+
+def test_reasoning_rule_matches_model_name_with_wildcard():
+    """同一个网关上不同系列的开法不一样，按模型名分别配。"""
+    from app.services.inference import resolve_params
+
+    qwen = build_personal_config("qwen3-32b", "sk", _RULES)
+    assert resolve_params(qwen, {"reasoning": True}) == {
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
+
+    oss = build_personal_config("gpt-oss-120b", "sk", _RULES)
+    assert oss.reasoning_effort_options == ["low", "medium", "high"]
+    assert resolve_params(oss, {"reasoning": True}) == {"reasoning_effort": "medium"}
+    assert resolve_params(oss, {"reasoning": True, "reasoning_effort": "high"}) == {
+        "reasoning_effort": "high",
+    }
+
+
+def test_reasoning_rule_can_mark_a_model_as_unsupported():
+    """有些模型压根不支持推理，规则里关掉，前端连开关都不显示。"""
+    from app.services.inference import resolve_params
+
+    mc = build_personal_config("qwen2.5-instruct", "sk", _RULES)
+    assert mc.reasoning_mode == "off"
+    assert resolve_params(mc, {"reasoning": True}) == {}
+
+
+def test_unmatched_model_falls_back_to_gateway_default():
+    from app.services.inference import resolve_params
+
+    mc = build_personal_config("some-other-model", "sk", _RULES)
+    assert resolve_params(mc, {"reasoning": True}) == {"enable_thinking": True}
+
+
+def test_first_matching_rule_wins():
+    """规则按顺序取第一条命中的，管理员靠排序决定优先级。"""
+    runtime = {
+        **DEFAULTS,
+        "user_gateway_reasoning_rules": [
+            {"pattern": "qwen3-32b", "payload": {"精确": True}},
+            {"pattern": "qwen3-*", "payload": {"通配": True}},
+        ],
+    }
+    mc = build_personal_config("qwen3-32b", "sk", runtime)
+    assert mc.reasoning_payload == {"精确": True}
+
+
+def test_global_switch_off_beats_every_rule():
+    """管理员整体关掉推理时，规则一律不生效。"""
+    mc = build_personal_config("qwen3-32b", "sk", {
+        **_RULES, "user_gateway_reasoning_enabled": False,
+    })
+    assert mc.reasoning_mode == "off"
+
+
 def test_admin_can_disable_reasoning_toggle_entirely():
     from app.services.inference import resolve_params
 

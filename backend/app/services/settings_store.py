@@ -38,6 +38,11 @@ DEFAULTS: dict = {
     "user_gateway_reasoning_effort_options": [],
     # 用户没选时用哪一档；留空则取名单第一项
     "user_gateway_reasoning_default_effort": "",
+    # 按模型名覆盖上面那份默认配置。个人模型不入库，只能靠模型名匹配：
+    # [{"pattern": "qwen3-*", "enabled": true, "payload": {...},
+    #   "effort_options": [...], "default_effort": "medium"}]
+    # pattern 支持 * 通配，按顺序取第一条命中的
+    "user_gateway_reasoning_rules": [],
     # ---- 文件保留期 ----
     # 终态任务（成功/完成/失败/取消）的输入与结果文件保留多少天，0 = 永久保留。
     # 到期后由 worker 自动清除文件，任务记录与统计保留。

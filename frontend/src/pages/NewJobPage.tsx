@@ -8,7 +8,8 @@ import { InboxOutlined, KeyOutlined, ReloadOutlined } from '@ant-design/icons'
 import type { UploadFile } from 'antd/es/upload/interface'
 import { api } from '../api'
 import type {
-  DryRunResult, ModelOption, ModelOptions, MyUsage, SystemSettings, UploadResult,
+  DryRunResult, ModelOption, ModelOptions, MyUsage, PersonalReasoningCap, SystemSettings,
+  UploadResult,
 } from '../api'
 import { formatBytes, formatNumber } from '../utils'
 import { defaultEffort, sortEfforts } from '../reasoning'
@@ -45,18 +46,22 @@ function parseSelection(value?: string): Selection | null {
   return { source, key: value.slice(idx + 1) }
 }
 
-/** 个人模型拿不到能力声明，按最宽松处理，由网关自己拒绝不支持的参数 */
-function personalCaps(settings: SystemSettings | null) {
+/**
+ * 个人模型拿不到能力声明，采样参数按最宽松处理，由网关自己拒绝不支持的；
+ * 推理部分则用后端按模型名规则算好的 cap，拿不到才退回网关默认配置。
+ */
+function personalCaps(settings: SystemSettings | null, cap?: PersonalReasoningCap) {
+  const fallbackMode = (settings?.user_gateway_reasoning_enabled ?? true) ? 'optional' : 'off'
   return {
     supports_temperature: true,
     supports_system_prompt: true,
     supports_json_mode: true,
-    // 推理开关默认可切换、默认关闭；管理员可以整体关掉
-    reasoning_mode: (settings?.user_gateway_reasoning_enabled ?? true)
-      ? ('optional' as const)
-      : ('off' as const),
-    reasoning_effort_options: settings?.user_gateway_reasoning_effort_options ?? [],
-    reasoning_default_effort: settings?.user_gateway_reasoning_default_effort ?? '',
+    // 推理开关默认可切换、默认关闭；管理员可以整体关掉，也可以按模型名关掉
+    reasoning_mode: (cap?.reasoning_mode ?? fallbackMode) as 'off' | 'optional',
+    reasoning_effort_options:
+      cap?.effort_options ?? settings?.user_gateway_reasoning_effort_options ?? [],
+    reasoning_default_effort:
+      cap?.default_effort ?? settings?.user_gateway_reasoning_default_effort ?? '',
     max_concurrency: settings?.user_gateway_max_concurrency ?? 0,
     max_tokens_cap: settings?.user_gateway_max_tokens_cap ?? 0,
   }
@@ -128,8 +133,10 @@ export default function NewJobPage() {
       : undefined),
     [options, selection],
   )
-  // 公用模型用它自己的能力声明，个人模型用宽松默认
-  const caps = selection?.source === 'personal' ? personalCaps(settings) : sharedModel
+  // 公用模型用它自己的能力声明，个人模型用网关按模型名算出来的那份
+  const caps = selection?.source === 'personal'
+    ? personalCaps(settings, options?.personal_reasoning?.[selection.key])
+    : sharedModel
 
   const effortOptions = useMemo(
     () => sortEfforts(caps?.reasoning_effort_options ?? []), [caps],
@@ -151,6 +158,7 @@ export default function NewJobPage() {
       message.success(`拉取到 ${res.models.length} 个可用模型`)
       setOptions((prev) => prev && {
         ...prev, personal: res.models, personal_error: null,
+        personal_reasoning: res.reasoning ?? {},
         has_saved_token: prev.has_saved_token || res.saved,
       })
       setEditingToken(false)
