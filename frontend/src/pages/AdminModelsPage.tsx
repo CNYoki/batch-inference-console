@@ -199,7 +199,7 @@ export default function AdminModelsPage() {
       <Alert
         type="info" showIcon style={{ marginBottom: 16 }}
         message="所有模型都通过 OpenAI 兼容协议调用"
-        description="base_url 填到 /v1 为止（例 http://127.0.0.1:8000/v1），vLLM、Ollama、SGLang、one-api/new-api 等网关均适用。API Key 加密存储，不会回显。"
+        description="base_url 填到 /v1 为止（例 http://127.0.0.1:8000/v1），vLLM、Ollama、SGLang 等网关均适用。"
       />
       <Table rowKey="id" loading={loading} columns={columns} dataSource={rows} scroll={{ x: 1200 }}
         pagination={false} />
@@ -228,7 +228,7 @@ export default function AdminModelsPage() {
               </Form.Item>
             </Col>
           </Row>
-          <Form.Item name="description" label="描述"><Input placeholder="给用户看的说明，可留空" /></Form.Item>
+          <Form.Item name="description" label="描述"><Input placeholder="可留空" /></Form.Item>
 
           <Row gutter={16}>
             <Col span={14}>

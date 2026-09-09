@@ -119,11 +119,6 @@ export default function ScriptGeneratorPage() {
     <Row gutter={16}>
       <Col xs={24} xl={13}>
         <Card title="生成数据切分脚本">
-          <Alert
-            type="info" showIcon style={{ marginBottom: 16 }}
-            message="本地数据太大或格式不对？让脚本先处理一遍"
-            description="填好下面的映射关系，生成一个 Python 脚本在你自己机器上跑，把 CSV / JSONL / Parquet 转成平台可直接上传的 JSONL，并按行数和大小自动切分。数据不会离开你的机器。"
-          />
           <Form
             form={form} layout="vertical"
             initialValues={{ ...DEFAULT_CONFIG, extra_body_text: '' }}

@@ -43,7 +43,7 @@ export default function LoginPage() {
           批量推理平台
         </Typography.Title>
         <Typography.Paragraph type="secondary" style={{ textAlign: 'center' }}>
-          上传 JSONL，批量调用大模型
+          LLM 批量推理平台
         </Typography.Paragraph>
 
         {oidcError && (

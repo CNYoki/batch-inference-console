@@ -313,7 +313,6 @@ export default function AdminSystemPage() {
             <Button type="primary" loading={saving} onClick={() => void saveSettings()}>保存设置</Button>
             <Typography.Text type="secondary">
               上传上限 {settings?.max_upload_mb ?? '—'} MB · 单任务最多 {formatNumber(settings?.max_items_per_job ?? 0)} 条
-              （这两项在后端环境变量中配置）
             </Typography.Text>
           </Space>
         </Form>
@@ -322,9 +321,7 @@ export default function AdminSystemPage() {
       <Card title="存储空间">
         <Form form={form} layout="vertical" style={{ maxWidth: 720 }}>
           <Typography.Paragraph type="secondary">
-            超出上限时用户上传会被直接拒绝，提示「已达到储存空间上限，请联系管理员」。
-            用量 = 未被清理任务的输入 + 结果文件，加上尚未提交成任务的暂存上传。
-            删除任务或到期清理都会立刻把空间还回去。
+            任务的输入与结果文件占用磁盘空间，超过全站上限或单用户上限时无法提交新任务。
           </Typography.Paragraph>
           <Space size={40} align="start" wrap>
             <Form.Item name="max_total_storage_gb" label="全站上限" extra="0 表示不限">
@@ -335,7 +332,7 @@ export default function AdminSystemPage() {
               <InputNumber min={0} style={{ width: 170 }} addonAfter="GB" />
             </Form.Item>
             <Form.Item name="stale_upload_hours" label="暂存上传保留"
-              extra="传了但一直没提交成任务的文件，超时后清掉；0 = 不清理">
+              extra="0 表示不清理">
               <InputNumber min={0} max={8760} style={{ width: 150 }} addonAfter="小时" />
             </Form.Item>
           </Space>
@@ -362,17 +359,11 @@ export default function AdminSystemPage() {
 
       <Card title="文件保留期">
         <Form form={form} layout="vertical" style={{ maxWidth: 720 }}>
-          <Typography.Paragraph type="secondary">
-            终态任务（已完成 / 失败 / 已取消）的输入与结果文件超过保留期后由 worker 自动清除，
-            每小时扫描一次。<strong>任务记录、进度与用量统计一律保留</strong>，只删磁盘文件，
-            所以历史统计不会出现断层。运行中和排队中的任务永远不会被清理。
-          </Typography.Paragraph>
           <Space size={40} align="start" wrap>
             <Form.Item name="file_retention_days" label="最长保留天数" extra="0 表示永久保留">
               <InputNumber min={0} max={3650} style={{ width: 160 }} addonAfter="天" />
             </Form.Item>
-            <Form.Item name="purge_input_files" label="同时清除上传的原始文件" valuePropName="checked"
-              extra="关闭则只删结果，输入文件留着仍可重跑">
+            <Form.Item name="purge_input_files" label="同时清除上传的原始文件" valuePropName="checked">
               <Switch />
             </Form.Item>
           </Space>
@@ -421,17 +412,12 @@ export default function AdminSystemPage() {
             >
               立即清理
             </Button>
-            <Typography.Text type="secondary">不等 worker 的下一轮，马上执行一次</Typography.Text>
           </Space>
         </Form>
       </Card>
 
       <Card title="邮件通知">
         <Form form={form} layout="vertical" style={{ maxWidth: 820 }}>
-          <Typography.Paragraph type="secondary">
-            任务结束后给提交者发邮件。用户默认接收，可在「个人设置」里自行关闭；
-            没填邮箱的用户会被自动跳过。发信失败只记日志，不影响任务本身。
-          </Typography.Paragraph>
 
           <Space size={40} align="start" wrap>
             <Form.Item name="smtp_enabled" label="启用邮件通知" valuePropName="checked">

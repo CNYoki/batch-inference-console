@@ -10,9 +10,9 @@ import { api } from '../api'
 import type { ModelOption, ModelOptions, MyUsage, SystemSettings, UploadResult } from '../api'
 import { formatBytes, formatNumber } from '../utils'
 
-const SAMPLE = `{"custom_id": "req-1", "body": {"messages": [{"role": "user", "content": "把这句话翻译成英文：今天天气不错"}]}}
+const SAMPLE = `{"custom_id": "req-1", "body": {"messages": [{"role": "user", "content": "把这句话翻译成英文：珞珈山下，清风徐来。"}]}}
 {"custom_id": "req-2", "messages": [{"role": "user", "content": "总结这段文字……"}]}
-{"custom_id": "req-3", "prompt": "写一句七言绝句"}`
+{"custom_id": "req-3", "prompt": "写一首春天的诗"}`
 
 /** 下拉框的值把来源编进去：shared:<配置id> / personal:<模型名> */
 type Selection = { source: 'shared' | 'personal'; key: string }
@@ -188,7 +188,7 @@ export default function NewJobPage() {
 
     if (options.shared.length) {
       groups.push({
-        label: '公用模型（管理员配置，无需 token）',
+        label: '公用模型',
         options: options.shared.map((m) => ({
           value: `shared:${m.id}`,
           name: `${m.display_name} ${m.name}`,
@@ -203,7 +203,7 @@ export default function NewJobPage() {
     }
     if (options.personal.length) {
       groups.push({
-        label: `我的模型 · ${options.gateway_label}（用你自己的 token 调用）`,
+        label: `我的模型 · ${options.gateway_label}`,
         options: options.personal.map((n) => ({
           value: `personal:${n}`,
           name: n,
@@ -292,7 +292,7 @@ export default function NewJobPage() {
                   <Alert
                     style={{ marginTop: 12 }} type="warning" showIcon
                     message="存在重复的 custom_id"
-                    description={`结果将难以与原始数据一一对齐，例如：${upload.duplicate_custom_ids.slice(0, 5).join('、')}`}
+                    description={`请检查上传文件，例如：${upload.duplicate_custom_ids.slice(0, 5).join('、')}`}
                   />
                 )}
                 {upload.preview.length > 0 && upload.errors.length === 0 && (
@@ -329,7 +329,7 @@ export default function NewJobPage() {
                       message="个人模型列表拉取失败"
                       description={<>
                         {options.personal_error}
-                        <br />请重新填写下方的 token。公用模型不受影响，仍可正常选择。
+                        <br />请重新填写你的 token。
                       </>}
                     />
                   )}
@@ -350,10 +350,10 @@ export default function NewJobPage() {
                   ) : (
                     <div style={{ marginBottom: 12 }}>
                       <Typography.Text strong>{options.gateway_label} token</Typography.Text>
-                      <Typography.Paragraph type="secondary" style={{ marginBottom: 8, fontSize: 12 }}>
+                      {/* <Typography.Paragraph type="secondary" style={{ marginBottom: 8, fontSize: 12 }}>
                         填写你本人的 token，系统会去 <span className="mono">{options.gateway_base_url}</span> 拉取
-                        你有权限的模型。token 加密保存，用量算在你自己账上。
-                      </Typography.Paragraph>
+                        你有权限的模型。
+                      </Typography.Paragraph> */}
                       <Space.Compact style={{ width: '100%' }}>
                         <Input.Password
                           prefix={<KeyOutlined />}
@@ -371,7 +371,7 @@ export default function NewJobPage() {
                       <Space style={{ marginTop: 8 }}>
                         <Switch size="small" checked={rememberToken} onChange={setRememberToken} />
                         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                          记住 token，下次不用再填
+                          记住 token
                         </Typography.Text>
                       </Space>
                     </div>
@@ -384,7 +384,7 @@ export default function NewJobPage() {
                 <Select
                   showSearch
                   placeholder={
-                    modelGroups.length ? '选择公用模型，或先拉取你的个人模型' : '暂无可用模型'
+                    modelGroups.length ? '选择可用模型' : '暂无可用模型'
                   }
                   options={modelGroups}
                   optionFilterProp="name"
@@ -408,12 +408,12 @@ export default function NewJobPage() {
 
             <Card title="3. 任务与推理参数">
               <Form.Item name="name" label="任务名称" rules={[{ required: true, message: '请填写任务名称' }]}>
-                <Input placeholder="例：客服问答标注-第一批" maxLength={255} />
+                <Input placeholder="例：数据标注-chunk1" maxLength={255} />
               </Form.Item>
 
               {caps?.supports_system_prompt !== false && (
-                <Form.Item name="system_prompt" label="系统提示词（可选）"
-                  extra="会作为 system 消息注入到每一条请求；若该条数据自带 system 消息则不覆盖">
+                <Form.Item name="system_prompt" label="System Prompt（可选）"
+                  extra="会作为 system 消息注入到每一条请求；不覆盖数据中的 system 消息。">
                   <Input.TextArea rows={3} maxLength={20000} showCount
                     placeholder="例：你是一名严谨的数据标注员，只输出 JSON。" />
                 </Form.Item>
@@ -478,7 +478,7 @@ export default function NewJobPage() {
                   label: '高级选项',
                   children: (
                     <>
-                      <Form.Item name="priority" label="优先级" extra="数值越小越先被 worker 领取，默认 100">
+                      <Form.Item name="priority" label="优先级" extra="数值越小优先级越大">
                         <InputNumber min={0} max={1000} style={{ width: 160 }} />
                       </Form.Item>
                       <Form.Item name="extra" label="附加请求参数 (JSON)"

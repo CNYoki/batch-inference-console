@@ -120,7 +120,7 @@ export default function ProfilePage() {
             </Form.Item>
             <Form.Item name="email" label="接收邮箱"
               extra={user.auth_source === 'oidc'
-                ? '来自统一登录，可以在这里改成别的地址'
+                ? '支持自定义接收邮箱'
                 : '留空则收不到通知'}>
               <Input type="email" placeholder="you@example.com" />
             </Form.Item>
@@ -154,7 +154,7 @@ export default function ProfilePage() {
           <Typography.Paragraph type="secondary">
             用于拉取你有权限的模型，并在任务执行时以你的身份调用
             <span className="mono"> {settings.user_gateway_base_url}</span>。
-            token 加密保存，平台不会以明文展示或导出。
+            token 加密保存.
           </Typography.Paragraph>
 
           {user.llm_token_masked ? (
@@ -191,7 +191,7 @@ export default function ProfilePage() {
           </Space>
           {user.llm_token_masked && (
             <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 12, marginBottom: 0 }}>
-              清除后，正在排队的「个人模型」任务会因拿不到 token 而失败 —— 重新填写后可在任务详情页点「恢复」继续。
+              清除后，正在排队的「个人模型」任务会因拿不到 token 而失败，需要手动恢复。
             </Typography.Paragraph>
           )}
         </Card>
