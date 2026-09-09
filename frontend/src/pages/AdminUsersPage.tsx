@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
-  App, Button, Card, Form, Input, InputNumber, Modal, Select, Space, Switch, Table, Tag, Typography,
+  App, Button, Card, Col, Form, Input, InputNumber, Modal, Row, Select, Space, Switch, Table, Tag, Typography,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons'
@@ -136,7 +136,7 @@ export default function AdminUsersPage() {
       <Modal
         title={editing ? `编辑用户：${editing.username}` : '新增本地账号'}
         open={open} onCancel={() => setOpen(false)} onOk={() => void save()}
-        confirmLoading={saving} okText="保存" cancelText="取消" destroyOnClose
+        confirmLoading={saving} okText="保存" cancelText="取消" destroyOnClose width={640}
       >
         <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
           <Form.Item name="username" label="用户名" rules={[{ required: !editing, message: '请填写用户名' }]}>
@@ -149,23 +149,35 @@ export default function AdminUsersPage() {
           </Form.Item>
           <Form.Item name="display_name" label="显示名"><Input /></Form.Item>
           <Form.Item name="email" label="邮箱"><Input type="email" /></Form.Item>
-          <Space size={24} align="start">
-            <Form.Item name="role" label="角色" style={{ width: 160 }}>
-              <Select options={[{ value: 'user', label: '普通用户' }, { value: 'admin', label: '管理员' }]} />
-            </Form.Item>
-            <Form.Item name="max_concurrent_jobs" label="并发任务上限" extra="0 表示不限">
-              <InputNumber min={0} style={{ width: 130 }} />
-            </Form.Item>
-            <Form.Item name="max_storage_mb" label="存储上限" extra="0 = 用全局默认值">
-              <InputNumber min={0} style={{ width: 150 }} addonAfter="MB" />
-            </Form.Item>
-            <Form.Item name="notify_email" label="邮件通知" valuePropName="checked">
-              <Switch />
-            </Form.Item>
+          <Row gutter={16}>
+            <Col xs={24} sm={8}>
+              <Form.Item name="role" label="角色">
+                <Select options={[{ value: 'user', label: '普通用户' }, { value: 'admin', label: '管理员' }]} />
+              </Form.Item>
+            </Col>
+            <Col xs={12} sm={8}>
+              <Form.Item name="max_concurrent_jobs" label="并发任务上限" extra="0 表示不限">
+                <InputNumber min={0} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col xs={12} sm={8}>
+              <Form.Item name="max_storage_mb" label="存储上限" extra="0 = 用全局默认值">
+                <InputNumber min={0} style={{ width: '100%' }} addonAfter="MB" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col xs={12} sm={8}>
+              <Form.Item name="notify_email" label="邮件通知" valuePropName="checked">
+                <Switch />
+              </Form.Item>
+            </Col>
             {editing && (
-              <Form.Item name="is_active" label="启用" valuePropName="checked"><Switch /></Form.Item>
+              <Col xs={12} sm={8}>
+                <Form.Item name="is_active" label="启用" valuePropName="checked"><Switch /></Form.Item>
+              </Col>
             )}
-          </Space>
+          </Row>
         </Form>
       </Modal>
     </Card>
