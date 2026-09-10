@@ -5,8 +5,7 @@
 batch-inference 插件调用，也可以直接在终端里用。
 
 约定：命令的结果以 JSON 打到 stdout，过程信息打到 stderr；
-退出码 0 = 成功，1 = 失败或校验没通过，2 = 用法错误。
-
+退出码 0 = 成功，1 = 失败或校验没通过，2 = 用法错误，3 = wait 超时，130 = Ctrl-C 中断。
 凭证：到平台「个人设置 → API Token」生成，按页面上给出的命令写入
 ~/.config/bic/config.json，或设置环境变量 BIC_URL / BIC_TOKEN。
 """
