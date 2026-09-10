@@ -27,6 +27,9 @@ log = logging.getLogger("worker")
 IDLE_SLEEP = 1.0        # 队列为空时的轮询间隔
 HEARTBEAT_SECONDS = 10.0
 REAP_SECONDS = 30.0
+# 心跳停了这么久就从看板上删掉。要明显长于看板的「心跳超时」判定（45s），
+# 让崩溃的 worker 先以超时状态露个面，方便发现问题
+DEAD_WORKER_SECONDS = 600.0
 RETENTION_SECONDS = 3600.0   # 保留期清理的扫描间隔
 
 
@@ -170,7 +173,7 @@ class Worker:
             await asyncio.sleep(RETENTION_SECONDS)
 
     async def _reaper_loop(self) -> None:
-        """回收租约过期的任务（持有者进程崩溃/被杀）。"""
+        """回收租约过期的任务，并清掉心跳早已停止的 worker 记录（持有者进程崩溃/被杀）。"""
         while True:
             await asyncio.sleep(REAP_SECONDS)
             try:
@@ -179,6 +182,12 @@ class Worker:
                     log.warning("回收超时任务并重新入队: %s", revived)
             except Exception as exc:  # noqa: BLE001
                 log.warning("租约回收失败: %s", exc)
+            try:
+                purged = await queue.purge_dead_workers(DEAD_WORKER_SECONDS)
+                if purged:
+                    log.info("清理已失联的 worker 记录: %s", purged)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("清理失联 worker 失败: %s", exc)
 
 
 def main() -> None:
