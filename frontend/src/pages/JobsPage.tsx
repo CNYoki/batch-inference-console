@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   App, Button, Card, Dropdown, Flex, Input, Progress, Select, Space, Switch, Table, Tag, Tooltip,
   Typography,
@@ -25,14 +25,34 @@ export default function JobsPage() {
   const { modal, message } = App.useApp()
   const { isAdmin } = useAuth()
 
+  const location = useLocation()
   const [data, setData] = useState<Job[]>([])
   const [total, setTotal] = useState(0)
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(20)
-  const [statuses, setStatuses] = useState<JobStatus[]>([])
-  const [keyword, setKeyword] = useState('')
-  const [mine, setMine] = useState(true)
   const [loading, setLoading] = useState(true)
+
+  // 页码与筛选条件放在网址参数里：从详情页返回、浏览器后退、刷新页面都能回到原来那一页
+  const [searchParams, setSearchParams] = useSearchParams()
+  const page = Number(searchParams.get('page')) || 1
+  const pageSize = Number(searchParams.get('size')) || 20
+  const statusParam = searchParams.get('status') ?? ''
+  const statuses = useMemo(
+    () => (statusParam ? statusParam.split(',') as JobStatus[] : []), [statusParam],
+  )
+  const keyword = searchParams.get('q') ?? ''
+  const mine = searchParams.get('all') !== '1'
+
+  /** 改网址参数；值为 null/空串即删掉该项。除了翻页，改其他条件都回到第一页 */
+  const updateQuery = useCallback((changes: Record<string, string | number | null>) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      if (!('page' in changes)) next.delete('page')
+      for (const [key, value] of Object.entries(changes)) {
+        if (value === null || value === '') next.delete(key)
+        else next.set(key, String(value))
+      }
+      return next
+    }, { replace: true })  // 翻页不往浏览器历史里塞记录
+  }, [setSearchParams])
 
   const load = useCallback(async (showLoading = false) => {
     if (showLoading) setLoading(true)
@@ -43,12 +63,21 @@ export default function JobsPage() {
         keyword: keyword || undefined,
         mine: isAdmin ? mine : true,
       })
+      // 回来时这一页可能已经空了（比如在详情页删掉了最后一页唯一的任务），退到最后一页
+      if (!res.items.length && page > 1 && res.total > 0) {
+        const last = Math.ceil(res.total / pageSize)
+        updateQuery({ page: last > 1 ? last : null })
+        return
+      }
       setData(res.items)
       setTotal(res.total)
     } finally {
       setLoading(false)
     }
-  }, [page, pageSize, statuses, keyword, mine, isAdmin])
+  }, [page, pageSize, statuses, keyword, mine, isAdmin, updateQuery])
+
+  /** 进详情时带上列表的网址参数，详情页的「返回」按它回到原来那一页 */
+  const openJob = (id: string) => navigate(`/jobs/${id}`, { state: { from: location.search } })
 
   useEffect(() => { void load(true) }, [load])
 
@@ -79,7 +108,7 @@ export default function JobsPage() {
     {
       title: '任务名称', dataIndex: 'name', width: 220, ellipsis: true,
       render: (name: string, job) => (
-        <a onClick={() => navigate(`/jobs/${job.id}`)}>{name}</a>
+        <a onClick={() => openJob(job.id)}>{name}</a>
       ),
     },
     ...(isAdmin && !mine
@@ -156,7 +185,7 @@ export default function JobsPage() {
               ],
               onClick: ({ key, domEvent }) => {
                 domEvent.stopPropagation()
-                if (key === 'detail') navigate(`/jobs/${job.id}`)
+                if (key === 'detail') openJob(job.id)
                 if (key === 'download') window.open(downloadUrl(`/jobs/${job.id}/download?fmt=raw`), '_blank')
                 if (key === 'pause') void act(() => api.pauseJob(job.id), '已请求暂停')
                 if (key === 'resume') void act(() => api.resumeJob(job.id), '已重新入队')
@@ -188,16 +217,17 @@ export default function JobsPage() {
       <Flex gap={12} wrap style={{ marginBottom: 16 }}>
         <Input.Search
           allowClear placeholder="搜索任务名称" style={{ width: 240 }}
-          onSearch={(v) => { setKeyword(v); setPage(1) }}
+          defaultValue={keyword}
+          onSearch={(v) => updateQuery({ q: v.trim() })}
         />
         <Select
           mode="multiple" allowClear placeholder="按状态筛选" style={{ minWidth: 220 }}
           options={STATUS_OPTIONS} value={statuses}
-          onChange={(v) => { setStatuses(v); setPage(1) }}
+          onChange={(v: JobStatus[]) => updateQuery({ status: v.join(',') })}
         />
         {isAdmin && (
           <Space>
-            <Switch checked={!mine} onChange={(v) => { setMine(!v); setPage(1) }} />
+            <Switch checked={!mine} onChange={(v) => updateQuery({ all: v ? '1' : null })} />
             <Typography.Text type="secondary">查看全部用户的任务</Typography.Text>
           </Space>
         )}
@@ -212,7 +242,8 @@ export default function JobsPage() {
         pagination={{
           current: page, pageSize, total, showSizeChanger: true,
           showTotal: (t) => `共 ${formatNumber(t)} 个任务`,
-          onChange: (p, ps) => { setPage(p); setPageSize(ps) },
+          // 默认值不写进网址，保持地址干净
+          onChange: (p, ps) => updateQuery({ page: p > 1 ? p : null, size: ps !== 20 ? ps : null }),
         }}
       />
     </Card>

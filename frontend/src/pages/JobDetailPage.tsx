@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import {
   Alert, App, Button, Card, Col, Descriptions, Dropdown, Empty, Progress, Result, Row, Space,
   Statistic, Table, Tabs, Tag, Typography,
@@ -19,7 +19,10 @@ import { ACTIVE_STATUSES, formatBytes, formatDateTime, formatDuration, formatNum
 export default function JobDetailPage() {
   const { jobId = '' } = useParams()
   const navigate = useNavigate()
+  const location = useLocation()
   const { modal, message } = App.useApp()
+  // 从列表点进来时带着列表的页码与筛选条件，返回时原样回去；直接打开链接则回第一页
+  const listUrl = `/jobs${(location.state as { from?: string } | null)?.from ?? ''}`
 
   const [job, setJob] = useState<Job | null>(null)
   const [notFound, setNotFound] = useState(false)
@@ -58,7 +61,7 @@ export default function JobDetailPage() {
 
   if (notFound) {
     return <Result status="404" title="任务不存在" subTitle="它可能已被删除，或你没有访问权限"
-      extra={<Button type="primary" onClick={() => navigate('/jobs')}>返回任务列表</Button>} />
+      extra={<Button type="primary" onClick={() => navigate(listUrl)}>返回任务列表</Button>} />
   }
   if (!job) return <Card loading />
 
@@ -104,7 +107,7 @@ export default function JobDetailPage() {
         <Row justify="space-between" align="middle" gutter={[16, 16]}>
           <Col>
             <Space align="center" wrap>
-              <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/jobs')} />
+              <Button icon={<ArrowLeftOutlined />} onClick={() => navigate(listUrl)} />
               <Typography.Title level={4} style={{ margin: 0 }}>{job.name}</Typography.Title>
               <JobStatusTag status={job.status} />
               {job.queue_position ? <Tag>队列第 {job.queue_position} 位</Tag> : null}
@@ -163,7 +166,7 @@ export default function JobDetailPage() {
                   title: '删除该任务？',
                   content: '任务记录、输入文件与结果都会被永久删除。',
                   okText: '删除', okButtonProps: { danger: true }, cancelText: '取消',
-                  onOk: async () => { await api.deleteJob(job.id); navigate('/jobs') },
+                  onOk: async () => { await api.deleteJob(job.id); navigate(listUrl) },
                 })}>删除</Button>
               )}
             </Space>

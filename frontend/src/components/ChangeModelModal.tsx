@@ -110,7 +110,6 @@ export default function ChangeModelModal(
       onOk={() => void onOk()}
       onCancel={onClose}
       destroyOnClose
-      styles={{ body: { maxHeight: '70vh', overflowY: 'auto' } }}
     >
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
         <Alert
