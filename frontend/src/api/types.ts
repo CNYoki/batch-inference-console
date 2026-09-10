@@ -309,6 +309,21 @@ export interface SavedPrompt extends SavedPromptInput {
   updated_at: string
 }
 
+/** 个人 API Token：命令行 / Claude Code Skills 用，列表里只有前缀 */
+export interface ApiToken {
+  id: string
+  name: string
+  token_prefix: string
+  created_at: string
+  expires_at?: string | null
+  last_used_at?: string | null
+}
+
+/** 创建时返回一次明文，之后再也拿不到 */
+export interface ApiTokenCreated extends ApiToken {
+  token: string
+}
+
 export interface StorageUsage {
   used: number
   limit: number       // 0 = 不限

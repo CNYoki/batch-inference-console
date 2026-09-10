@@ -1,0 +1,12 @@
+{
+  "name": "batch-inference",
+  "displayName": "Batch Inference Console",
+  "version": "0.1.0",
+  "description": "在本地完成批量推理的数据预处理、上传、提交任务与结果回收，配合 Batch Inference Console 平台使用",
+  "author": {
+    "name": "CNYoki"
+  },
+  "repository": "https://github.com/CNYoki/batch-inference-console",
+  "license": "MIT",
+  "keywords": ["batch-inference", "llm", "jsonl", "data-preprocessing"]
+}
