@@ -591,26 +591,12 @@ def _upload_one(client: Client, path: Path) -> dict:
     tail = f"\r\n--{boundary}--\r\n".encode()
     size = path.stat().st_size
 
-    def body():
-        yield head
-        sent, last = 0, time.monotonic()
-        with path.open("rb") as fh:
-            while True:
-                chunk = fh.read(1 << 20)
-                if not chunk:
-                    break
-                sent += len(chunk)
-                if time.monotonic() - last > 5:
-                    info(f"  {path.name}: 已上传 {human(sent)} / {human(size)}")
-                    last = time.monotonic()
-                yield chunk
-        yield tail
-
+    payload = head + path.read_bytes() + tail
     headers = {
         "Content-Type": f"multipart/form-data; boundary={boundary}",
-        "Content-Length": str(len(head) + size + len(tail)),
+        "Content-Length": str(len(payload)),
     }
-    with client.open("POST", "/jobs/upload", body=body(), headers=headers, timeout=3600) as resp:
+    with client.open("POST", "/jobs/upload", body=payload, headers=headers, timeout=3600) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
