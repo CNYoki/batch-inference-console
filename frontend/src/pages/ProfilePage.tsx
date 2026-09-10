@@ -5,6 +5,7 @@ import {
 import { KeyOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import type { MyUsage, SystemSettings } from '../api'
+import ApiTokensCard from '../components/ApiTokensCard'
 import { useAuth } from '../hooks/useAuth'
 import { formatBytes, formatDateTime } from '../utils'
 
@@ -196,6 +197,8 @@ export default function ProfilePage() {
           )}
         </Card>
       )}
+
+      <ApiTokensCard />
 
       {user.auth_source === 'local' && (
         <Card title="修改密码">

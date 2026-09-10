@@ -1,0 +1,14 @@
+{
+  "name": "batch-inference-console",
+  "owner": {
+    "name": "CNYoki"
+  },
+  "plugins": [
+    {
+      "name": "batch-inference",
+      "source": "./plugins/batch-inference",
+      "description": "在本地完成批量推理的数据预处理、上传、提交任务与结果回收",
+      "version": "0.1.0"
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 import { http } from './client'
 import type {
-  AuthInfo, Dashboard, DryRunResult, Job, JobErrorRow, JobList, MailTestResult, ModelConfig,
+  ApiToken, ApiTokenCreated, AuthInfo, Dashboard, DryRunResult, Job, JobErrorRow, JobList, MailTestResult, ModelConfig,
   ModelOption, ModelOptions, MyUsage, PersonalModels, ResultPage, RetentionPreview,
   SavedPrompt, SavedPromptInput, ScriptConfig, ScriptPreview, SystemSettings, UploadResult, User,
 } from './types'
@@ -21,6 +21,10 @@ export const api = {
     http.post('/auth/change-password', { old_password, new_password }).then((r) => r.data),
   oidcLogoutUrl: () =>
     http.get<{ end_session_url: string | null }>('/auth/oidc/logout').then((r) => r.data),
+  apiTokens: () => http.get<ApiToken[]>('/auth/tokens').then((r) => r.data),
+  createApiToken: (name: string, expires_in_days: number | null) =>
+    http.post<ApiTokenCreated>('/auth/tokens', { name, expires_in_days }).then((r) => r.data),
+  deleteApiToken: (id: string) => http.delete(`/auth/tokens/${id}`),
 
   // ---------------- 模型 ----------------
   models: () => http.get<ModelOption[]>('/models').then((r) => r.data),

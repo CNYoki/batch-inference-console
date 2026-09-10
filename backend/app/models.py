@@ -136,6 +136,9 @@ class User(Base, TimestampMixin):
     prompts: Mapped[list[UserPrompt]] = relationship(
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
+    api_tokens: Mapped[list[ApiToken]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+    )
 
     __table_args__ = (
         UniqueConstraint("oidc_issuer", "oidc_subject", name="uq_user_oidc"),
@@ -342,6 +345,34 @@ class UserPrompt(Base, TimestampMixin):
 
     # 同一个人的 Prompt 不能重名，否则在下拉框里分不清；唯一索引的前缀也覆盖了按用户查询
     __table_args__ = (UniqueConstraint("user_id", "name", name="uq_user_prompt_name"),)
+
+
+# --------------------------------------------------------------------------- #
+# 个人 API Token（命令行 / Claude Code Skills 调用）
+# --------------------------------------------------------------------------- #
+class ApiToken(Base, TimestampMixin):
+    """长期有效、可单独吊销的访问凭证。
+
+    OIDC 用户没有密码，会话 JWT 又只在 httpOnly Cookie 里且 12 小时过期，
+    脚本拿不到可用的凭证 —— 这张表就是给它们用的。库里只存 SHA-256，
+    明文只在创建时返回一次。
+    """
+
+    __tablename__ = "api_tokens"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    # 明文开头几位，列表里用来辨认是哪一个
+    token_prefix: Mapped[str] = mapped_column(String(16), nullable=False)
+    # 空 = 永不过期
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped[User] = relationship(back_populates="api_tokens")
+
+    __table_args__ = (Index("ix_api_tokens_user", "user_id"),)
 
 
 # --------------------------------------------------------------------------- #

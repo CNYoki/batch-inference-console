@@ -541,6 +541,36 @@ class PromptOut(PromptBase):
 
 
 # --------------------------------------------------------------------------- #
+# 个人 API Token
+# --------------------------------------------------------------------------- #
+class ApiTokenCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    # 空 = 永不过期
+    expires_in_days: int | None = Field(default=90, ge=1, le=3650)
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        return _check_prompt_name(v)
+
+
+class ApiTokenOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    token_prefix: str
+    created_at: datetime
+    expires_at: datetime | None = None
+    last_used_at: datetime | None = None
+
+
+class ApiTokenCreated(ApiTokenOut):
+    # 明文只在这一次返回，之后谁也拿不到
+    token: str
+
+
+# --------------------------------------------------------------------------- #
 # 系统 / 统计
 # --------------------------------------------------------------------------- #
 class QueueStats(BaseModel):
