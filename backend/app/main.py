@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .api import admin_settings, auth, jobs, model_configs, tools, users
+from .api import admin_settings, auth, jobs, model_configs, prompts, tools, users
 from .bootstrap import init_database
 from .config import settings
 from .db import engine
@@ -54,7 +54,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-for module in (auth, jobs, model_configs, users, admin_settings, tools):
+for module in (auth, jobs, model_configs, users, admin_settings, tools, prompts):
     app.include_router(module.router, prefix=settings.api_prefix)
 
 

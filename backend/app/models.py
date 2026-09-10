@@ -133,6 +133,9 @@ class User(Base, TimestampMixin):
     jobs: Mapped[list[Job]] = relationship(
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
+    prompts: Mapped[list[UserPrompt]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+    )
 
     __table_args__ = (
         UniqueConstraint("oidc_issuer", "oidc_subject", name="uq_user_oidc"),
@@ -312,6 +315,33 @@ class JobError(Base):
     job: Mapped[Job] = relationship(back_populates="errors")
 
     __table_args__ = (Index("ix_job_errors_job", "job_id", "item_index"),)
+
+
+# --------------------------------------------------------------------------- #
+# 我的 Prompt（数据预处理时复用）
+# --------------------------------------------------------------------------- #
+class UserPrompt(Base, TimestampMixin):
+    """用户保存的 Prompt 模板，连同它引用的数据变量一起存。
+
+    变量只是「变量名 → 源字段名」的映射，和生成脚本时填的是同一份结构，
+    存下来就能在不同数据集之间直接复用，不用每次重填。
+    """
+
+    __tablename__ = "user_prompts"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prompt_template: Mapped[str] = mapped_column(LongText, nullable=False)
+    # [{"name": "data", "field": "content"}, ...]
+    variables: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+
+    user: Mapped[User] = relationship(back_populates="prompts")
+
+    # 同一个人的 Prompt 不能重名，否则在下拉框里分不清；唯一索引的前缀也覆盖了按用户查询
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_user_prompt_name"),)
 
 
 # --------------------------------------------------------------------------- #

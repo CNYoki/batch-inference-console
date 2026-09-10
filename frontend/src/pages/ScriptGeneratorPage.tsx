@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
-  Alert, App, Button, Card, Col, Collapse, Divider, Form, Input, InputNumber, Row, Select,
+  Alert, App, Button, Card, Col, Collapse, Divider, Form, Input, InputNumber, Modal, Row, Select,
   Space, Switch, Tag, Tooltip, Typography,
 } from 'antd'
-import { CopyOutlined, DownloadOutlined, PlusOutlined, DeleteOutlined } from '@ant-design/icons'
+import { CopyOutlined, DownloadOutlined, SaveOutlined } from '@ant-design/icons'
 import { api } from '../api'
-import type { ScriptConfig, ScriptPreview, ScriptVariable } from '../api'
+import type { SavedPrompt, SavedPromptInput, ScriptConfig, ScriptPreview, ScriptVariable } from '../api'
+import PromptFields from '../components/PromptFields'
 
 const DEFAULT_CONFIG: ScriptConfig = {
   source_path: '/data/raw',
@@ -35,9 +37,16 @@ const DEFAULT_CONFIG: ScriptConfig = {
 
 export default function ScriptGeneratorPage() {
   const { message } = App.useApp()
+  const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const [form] = Form.useForm()
+  const [saveForm] = Form.useForm<{ name: string }>()
   const [preview, setPreview] = useState<ScriptPreview | null>(null)
   const [loading, setLoading] = useState(false)
+  const [prompts, setPrompts] = useState<SavedPrompt[]>([])
+  const [activePromptId, setActivePromptId] = useState<string | null>(null)
+  const [saveOpen, setSaveOpen] = useState(false)
+  const [savingPrompt, setSavingPrompt] = useState(false)
   const timer = useRef<number | null>(null)
 
   const buildConfig = useCallback((values: Record<string, unknown>): ScriptConfig => {
@@ -77,12 +86,67 @@ export default function ScriptGeneratorPage() {
     timer.current = window.setTimeout(() => void refresh(), 400)
   }, [refresh])
 
+  const applyPrompt = useCallback((p: SavedPrompt) => {
+    form.setFieldsValue({
+      variables: p.variables.map((v) => ({ ...v })),
+      system_prompt: p.system_prompt ?? '',
+      prompt_template: p.prompt_template,
+    })
+    setActivePromptId(p.id)
+    // setFieldsValue 不会触发 onValuesChange，得手动刷新预览
+    scheduleRefresh()
+  }, [form, scheduleRefresh])
+
   useEffect(() => {
     void refresh()
+    // 从「我的 Prompt」点「生成脚本」过来时带着 ?prompt=<id>，加载完直接带入
+    const wanted = searchParams.get('prompt')
+    api.prompts().then((list) => {
+      setPrompts(list)
+      const hit = wanted ? list.find((p) => p.id === wanted) : undefined
+      if (hit) applyPrompt(hit)
+    }).catch(() => undefined)
     return () => { if (timer.current) window.clearTimeout(timer.current) }
     // 只在首次挂载时生成一次
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  const openSaveModal = () => {
+    const active = prompts.find((p) => p.id === activePromptId)
+    saveForm.setFieldsValue({ name: active?.name ?? '' })
+    setSaveOpen(true)
+  }
+
+  const saveName = (Form.useWatch('name', saveForm) as string | undefined)?.trim() ?? ''
+  const overwriting = prompts.find((p) => p.name === saveName)
+
+  const savePrompt = async () => {
+    const { name } = await saveForm.validateFields()
+    const values = form.getFieldsValue() as Record<string, unknown>
+    const payload: SavedPromptInput = {
+      name: name.trim(),
+      variables: ((values.variables as ScriptVariable[]) || []).filter((v) => v?.name && v?.field),
+      system_prompt: (values.system_prompt as string) || null,
+      prompt_template: (values.prompt_template as string) || '',
+    }
+    if (!payload.prompt_template.trim()) {
+      message.error('Prompt 模板为空，先填好再保存')
+      return
+    }
+    setSavingPrompt(true)
+    try {
+      // 同名就覆盖那一条，而不是报「重名」让用户再去改
+      const saved = overwriting
+        ? await api.updatePrompt(overwriting.id, payload)
+        : await api.createPrompt(payload)
+      setPrompts(await api.prompts())
+      setActivePromptId(saved.id)
+      setSaveOpen(false)
+      message.success(overwriting ? `已更新「${saved.name}」` : `已保存为「${saved.name}」`)
+    } catch { /* 拦截器已提示 */ } finally {
+      setSavingPrompt(false)
+    }
+  }
 
   const copyScript = async () => {
     if (!preview) return
@@ -108,12 +172,6 @@ export default function ScriptGeneratorPage() {
 
   const sourceFormat = Form.useWatch('source_format', form) as string | undefined
   const customIdMode = Form.useWatch('custom_id_mode', form) as string | undefined
-  const variables = (Form.useWatch('variables', form) as ScriptVariable[] | undefined) ?? []
-
-  const varHint = useMemo(
-    () => variables.filter((v) => v?.name).map((v) => `{{${v.name}}}`).join('  '),
-    [variables],
-  )
 
   return (
     <Row gutter={16}>
@@ -179,40 +237,26 @@ export default function ScriptGeneratorPage() {
             </Space>
 
             <Divider orientation="left" plain>数据变量与 Prompt</Divider>
-            <Form.List name="variables">
-              {(fields, { add, remove }) => (
-                <>
-                  {fields.map((field) => (
-                    <Space key={field.key} align="baseline" style={{ display: 'flex', marginBottom: 8 }}>
-                      <Form.Item {...field} name={[field.name, 'name']} style={{ marginBottom: 0 }}
-                        rules={[{ required: true, message: '变量名' },
-                                { pattern: /^[A-Za-z_][A-Za-z0-9_]*$/, message: '字母/数字/下划线，不能数字开头' }]}>
-                        <Input addonBefore="变量" style={{ width: 200 }} className="mono" placeholder="data" />
-                      </Form.Item>
-                      <span style={{ opacity: 0.5 }}>←</span>
-                      <Form.Item {...field} name={[field.name, 'field']} style={{ marginBottom: 0 }}
-                        rules={[{ required: true, message: '源字段名' }]}>
-                        <Input addonBefore="字段" style={{ width: 240 }} className="mono" placeholder="content" />
-                      </Form.Item>
-                      <Button type="text" danger icon={<DeleteOutlined />} onClick={() => remove(field.name)} />
-                    </Space>
-                  ))}
-                  <Button type="dashed" icon={<PlusOutlined />} onClick={() => add({ name: '', field: '' })}
-                    style={{ marginBottom: 16 }}>
-                    添加变量
-                  </Button>
-                </>
-              )}
-            </Form.List>
-
-            <Form.Item name="system_prompt" label="系统提示词（可选）">
-              <Input.TextArea rows={2} placeholder="例：你是一名严谨的数据标注员，只输出 JSON。" />
-            </Form.Item>
-            <Form.Item name="prompt_template" label="Prompt 模板"
-              rules={[{ required: true, message: '请填写 Prompt' }]}
-              extra={varHint ? <>可用变量：<span className="mono">{varHint}</span></> : '先在上面添加变量'}>
-              <Input.TextArea rows={5} className="mono" />
-            </Form.Item>
+            <Space wrap style={{ marginBottom: 16 }}>
+              <Select
+                style={{ width: 260 }} placeholder="从我的 Prompt 导入" showSearch
+                optionFilterProp="label"
+                value={activePromptId ?? undefined}
+                options={prompts.map((p) => ({ value: p.id, label: p.name }))}
+                onChange={(id: string) => {
+                  const hit = prompts.find((p) => p.id === id)
+                  if (hit) applyPrompt(hit)
+                }}
+                notFoundContent={<span>还没有保存过 Prompt</span>}
+              />
+              <Tooltip title="把下面的变量、系统提示词和模板存进「我的 Prompt」">
+                <Button icon={<SaveOutlined />} onClick={openSaveModal}>保存为我的 Prompt</Button>
+              </Tooltip>
+              <Button type="link" onClick={() => navigate('/tools/prompts')} style={{ paddingInline: 4 }}>
+                管理
+              </Button>
+            </Space>
+            <PromptFields />
 
             <Collapse size="small" items={[{
               key: 'more',
@@ -327,6 +371,20 @@ export default function ScriptGeneratorPage() {
           </Card>
         </Space>
       </Col>
+
+      <Modal
+        title="保存为我的 Prompt" open={saveOpen} onCancel={() => setSaveOpen(false)}
+        onOk={() => void savePrompt()} confirmLoading={savingPrompt}
+        okText={overwriting ? '覆盖保存' : '保存'} cancelText="取消"
+      >
+        <Form form={saveForm} layout="vertical" style={{ marginTop: 16 }}>
+          <Form.Item name="name" label="名称"
+            rules={[{ required: true, whitespace: true, message: '请填写名称' }]}
+            extra={overwriting ? `将覆盖已有的「${overwriting.name}」` : '保存数据变量、系统提示词与 Prompt 模板'}>
+            <Input maxLength={128} placeholder="例：新闻摘要" onPressEnter={() => void savePrompt()} />
+          </Form.Item>
+        </Form>
+      </Modal>
     </Row>
   )
 }

@@ -470,6 +470,77 @@ class ScriptPreview(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
+# 我的 Prompt
+# --------------------------------------------------------------------------- #
+def _check_prompt_name(v: str | None) -> str | None:
+    if v is None:
+        return v
+    v = v.strip()
+    if not v:
+        raise ValueError("名称不能为空")
+    return v
+
+
+def _check_unique_variables(v: list[ScriptVariable] | None) -> list[ScriptVariable] | None:
+    # 同名变量在渲染时后一个会被忽略，存进去只会让人困惑，直接拒掉
+    names = [x.name for x in v or []]
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    if dupes:
+        raise ValueError(f"变量名重复：{'、'.join(dupes)}")
+    return v
+
+
+class PromptBase(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=1024)
+    system_prompt: str | None = Field(default=None, max_length=20000)
+    prompt_template: str = Field(min_length=1, max_length=50000)
+    variables: list[ScriptVariable] = Field(default_factory=list, max_length=50)
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        return _check_prompt_name(v)
+
+    @field_validator("variables")
+    @classmethod
+    def _check_variables(cls, v: list[ScriptVariable]) -> list[ScriptVariable]:
+        return _check_unique_variables(v)
+
+
+class PromptCreate(PromptBase):
+    pass
+
+
+class PromptUpdate(BaseModel):
+    """全部字段可选；description / system_prompt 传 null 表示清空。"""
+
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=1024)
+    system_prompt: str | None = Field(default=None, max_length=20000)
+    prompt_template: str | None = Field(default=None, min_length=1, max_length=50000)
+    variables: list[ScriptVariable] | None = Field(default=None, max_length=50)
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str | None) -> str | None:
+        return _check_prompt_name(v)
+
+    @field_validator("variables")
+    @classmethod
+    def _check_variables(cls, v: list[ScriptVariable] | None) -> list[ScriptVariable] | None:
+        return _check_unique_variables(v)
+
+
+class PromptOut(PromptBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+# --------------------------------------------------------------------------- #
 # 系统 / 统计
 # --------------------------------------------------------------------------- #
 class QueueStats(BaseModel):

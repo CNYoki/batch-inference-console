@@ -9,6 +9,7 @@ import JobDetailPage from './pages/JobDetailPage'
 import NewJobPage from './pages/NewJobPage'
 import ProfilePage from './pages/ProfilePage'
 import ScriptGeneratorPage from './pages/ScriptGeneratorPage'
+import PromptsPage from './pages/PromptsPage'
 import AdminModelsPage from './pages/AdminModelsPage'
 import AdminUsersPage from './pages/AdminUsersPage'
 import AdminSystemPage from './pages/AdminSystemPage'
@@ -44,6 +45,7 @@ export default function App() {
         <Route path="jobs/new" element={<NewJobPage />} />
         <Route path="jobs/:jobId" element={<JobDetailPage />} />
         <Route path="tools/split-script" element={<ScriptGeneratorPage />} />
+        <Route path="tools/prompts" element={<PromptsPage />} />
         <Route path="profile" element={<ProfilePage />} />
         <Route
           path="admin/models"

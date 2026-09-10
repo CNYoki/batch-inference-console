@@ -294,6 +294,21 @@ export interface ScriptPreview {
   problems: string[]
 }
 
+/** 我的 Prompt：模板 + 它引用的数据变量，只对本人可见 */
+export interface SavedPromptInput {
+  name: string
+  description?: string | null
+  system_prompt?: string | null
+  prompt_template: string
+  variables: ScriptVariable[]
+}
+
+export interface SavedPrompt extends SavedPromptInput {
+  id: string
+  created_at: string
+  updated_at: string
+}
+
 export interface StorageUsage {
   used: number
   limit: number       // 0 = 不限
