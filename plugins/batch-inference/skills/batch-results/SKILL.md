@@ -63,19 +63,21 @@ bic errors <任务ID> --limit 20
 bic retry-failed <任务ID>
 ```
 
-## 更换模型
+## 更换模型或修改参数
 
-任务处于 `paused`、`canceled` 或 `failed` 时可以换模型，比如原模型被下线、限流太严，或者想换个更强的模型。恢复后剩余条目用新模型跑，已完成的条目不会重跑，所以结果里会同时有新旧两个模型的输出。推理参数沿用原任务，按新模型的配置重新合并。
+任务处于 `paused`、`canceled` 或 `failed` 时可以换模型、改推理参数，比如原模型被下线、限流太严、`max_tokens` 给小了导致输出被截断。恢复后剩余条目按新配置跑，已完成的条目不会重跑，所以结果里会同时有新旧两份配置的输出。
 
-换模型并恢复会继续消耗额度，**先征得用户同意**：
+恢复会继续消耗额度，**先征得用户同意**：
 
 ```bash
-bic set-model <任务ID> --model <模型> --resume
+bic set-model <任务ID> --model <模型> --resume                  # 换模型，参数沿用
+bic set-model <任务ID> --max-tokens 4096 --temperature 0.2 --resume   # 只改参数，模型不变
 ```
 
-- 不带 `--resume` 只换模型、不入队，之后再用 `bic resume <任务ID>` 恢复。
+- 参数选项和 `submit` 一样（`--system-prompt`、`--temperature`、`--max-tokens`、`--reasoning-effort`、`--extra` 等）。只改给出的那几项，其余沿用原任务的参数。
+- 不带 `--resume` 只保存、不入队，之后再用 `bic resume <任务ID>` 恢复。
 - 个人网关模型只能换到自己的任务上。
-- 已失败的条目不会随恢复重跑；任务结束后用 `retry-failed` 重跑，这时用的也是新模型。
+- 已失败的条目不会随恢复重跑；任务结束后用 `retry-failed` 重跑，这时用的也是新配置。
 
 ## 下载结果
 

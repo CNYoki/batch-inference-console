@@ -146,7 +146,7 @@ export default function JobDetailPage() {
                   onClick={() => void act(() => api.resumeJob(job.id), '已重新入队')}>恢复</Button>
               )}
               {['paused', 'failed', 'canceled'].includes(job.status) && !purged && (
-                <Button icon={<SwapOutlined />} onClick={() => setChangingModel(true)}>更换模型</Button>
+                <Button icon={<SwapOutlined />} onClick={() => setChangingModel(true)}>更换模型/参数</Button>
               )}
               {finished && job.failed_items > 0 && !purged && (
                 <Button icon={<ReloadOutlined />}

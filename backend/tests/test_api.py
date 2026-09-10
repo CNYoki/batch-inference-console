@@ -1040,6 +1040,75 @@ async def test_change_model_only_on_stopped_jobs_and_reresolves_params(
         await db.delete(await db.get(Job, job_id))
 
 
+@pytest.mark.asyncio
+async def test_change_params_on_stopped_job(admin_client: AsyncClient, monkeypatch):
+    """模型不动只改参数也走同一个接口；参数整份替换，再按模型配置重新合并。"""
+    from sqlalchemy import select
+
+    from app.db import session_scope
+    from app.models import Job, JobStatus, ModelSource, User
+
+    model = (await admin_client.post("/api/admin/models", json={
+        "name": "params-model", "display_name": "改参数模型", "base_url": "http://x/v1",
+        "model_name": "p-m", "max_tokens_cap": 100,
+    })).json()
+
+    async with session_scope() as db:
+        admin = (await db.execute(select(User).where(User.username == "admin"))).scalar_one()
+        job = Job(
+            name="改参数", user_id=admin.id, model_config_id=model["id"], status=JobStatus.paused,
+            params={"temperature": 0.5, "max_tokens": 50, "stop": ["END"]},
+            resolved_params={"temperature": 0.5, "max_tokens": 50},
+            input_filename="a.jsonl", input_path="/tmp/none.jsonl", input_size=1, total_items=10,
+        )
+        db.add(job)
+        await db.flush()
+        job_id = job.id
+
+    url = f"/api/jobs/{job_id}/model"
+    out = (await admin_client.post(url, json={
+        "model_config_id": model["id"],
+        "params": {"temperature": 1.2, "max_tokens": 500, "system_prompt": "新提示"},
+    })).json()
+    assert out["status"] == "paused"
+    # 整份替换：没带上的 stop 就没了
+    assert out["params"]["temperature"] == 1.2 and "stop" not in out["params"]
+    async with session_scope() as db:
+        resolved = (await db.get(Job, job_id)).resolved_params
+    assert resolved["temperature"] == 1.2
+    assert resolved["max_tokens"] == 100          # 仍受模型的 max_tokens 上限约束
+    assert resolved["_system_prompt"] == "新提示"
+
+    # 不传 params：沿用刚才那份
+    out = (await admin_client.post(url, json={"model_config_id": model["id"]})).json()
+    assert out["params"]["system_prompt"] == "新提示"
+
+    # 管理员改别人个人模型任务的参数：模型没动就放行，换模型仍然不行
+    await _enable_gateway(admin_client)
+    _fake_gateway(monkeypatch)
+    await admin_client.post("/api/admin/users", json={
+        "username": "paramuser", "password": "UserPass123!", "role": "user",
+    })
+    async with session_scope() as db:
+        other = (await db.execute(select(User).where(User.username == "paramuser"))).scalar_one()
+        j = await db.get(Job, job_id)
+        j.user_id = other.id
+        j.model_source = ModelSource.personal
+        j.model_config_id = None
+        j.personal_model_name = "their-model"
+    same = await admin_client.post(url, json={
+        "model_source": "personal", "personal_model": "their-model", "params": {"max_tokens": 64},
+    })
+    assert same.status_code == 200, same.text
+    assert same.json()["params"]["max_tokens"] == 64
+    assert same.json()["model_display_name"] == "their-model"
+    swap = await admin_client.post(url, json={"model_source": "personal", "personal_model": "gw-model-a"})
+    assert swap.status_code == 400 and "提交者本人" in swap.json()["detail"]
+
+    async with session_scope() as db:
+        await db.delete(await db.get(Job, job_id))
+
+
 # --------------------------------------------------------------------------- #
 # worker 被强杀后，暂停/取消要能直接落状态
 # --------------------------------------------------------------------------- #

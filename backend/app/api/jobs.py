@@ -683,28 +683,41 @@ async def resume_job(job_id: str, user: CurrentUser, db: DB) -> JobOut:
 
 @router.post("/{job_id}/model", response_model=JobOut)
 async def change_model(job_id: str, payload: JobModelChange, user: CurrentUser, db: DB) -> JobOut:
-    """给停下来的任务换模型，恢复后剩余条目改用新模型。
+    """给停下来的任务换模型、改推理参数，恢复后剩余条目按新配置跑。
 
-    已完成的条目不会重跑，结果文件里会同时有新旧两个模型的输出。
-    推理参数沿用原任务提交时的那份，按新模型的默认值/强制值/白名单重新合并。
+    已完成的条目不会重跑，结果文件里会同时有新旧两份配置的输出。
+    params 不传就沿用原任务的那份；无论传没传，都按（新）模型的默认值/强制值/白名单重新合并。
     """
     job = await _get_job_or_404(db, user, job_id)
     if job.status not in MODEL_EDITABLE_STATUSES:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "只有已暂停/已取消/失败的任务可以更换模型")
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "只有已暂停/已取消/失败的任务可以更换模型或修改参数"
+        )
 
     personal = payload.model_source == ModelSource.personal.value
     if personal:
-        # worker 执行时用的是任务提交者本人的 token，校验也必须拿这个人的 token 做；
-        # 管理员替别人换成自己网关里的模型，排上队也跑不起来
-        if job.user_id != user.id:
+        same_model = (
+            job.model_source == ModelSource.personal
+            and job.personal_model_name == payload.personal_model
+        )
+        if job.user_id == user.id:
+            mc = await _resolve_personal_model(payload, user, db)
+        elif same_model:
+            # 管理员只改别人任务的参数：模型没动，用不着拿自己的 token 验权限。
+            # 拼一份不带 token 的配置只为合并参数，执行时 worker 用的仍是提交者本人的 token
+            mc = build_personal_config(payload.personal_model, "", await read_runtime(db))
+        else:
+            # worker 执行时用的是任务提交者本人的 token；
+            # 管理员替别人换成自己网关里的模型，排上队也跑不起来
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "个人网关模型只能由任务提交者本人设置")
-        mc = await _resolve_personal_model(payload, user, db)
     else:
         mc = await _resolve_shared_model(payload, user, db)
 
     job.model_source = ModelSource.personal if personal else ModelSource.shared
     job.model_config_id = None if personal else mc.id
     job.personal_model_name = payload.personal_model if personal else None
+    if payload.params is not None:
+        job.params = payload.params.model_dump(exclude_none=True)
     job.resolved_params = _resolve_job_params(mc, JobParams.model_validate(job.params or {}))
     if job.concurrency:
         # 原来的并发是按旧模型上限截过的，换了模型要按新上限再截一次

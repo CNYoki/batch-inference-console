@@ -874,16 +874,34 @@ def cmd_control(args) -> int:
     return 0
 
 
+def _current_model(job: dict) -> dict:
+    if job.get("model_source") == "personal":
+        return {"model_source": "personal", "personal_model": job.get("model_display_name")}
+    return {"model_source": "shared", "model_config_id": job.get("model_config_id")}
+
+
 def cmd_set_model(args) -> int:
     client = get_client()
-    selection, label = _resolve_model(client, args.model, args.personal)
+    new_params = _build_params(args)
+    if not args.model and not new_params:
+        raise CliError("请用 --model 指定新模型，或给出要修改的参数（如 --max-tokens）")
+    fixed = _resolve_model(client, args.model, args.personal)[0] if args.model else None
     jobs = []
     for j in _job_ids(args):
-        job = client.call("POST", f"/jobs/{j}/model", json_body=selection)
+        job = client.call("GET", f"/jobs/{j}")
+        body = dict(fixed or _current_model(job))
+        if new_params:
+            # 只改给出的那几项，其余沿用原任务的参数
+            old = job.get("params") or {}
+            merged = {**old, **new_params}
+            if "extra" in new_params:
+                merged["extra"] = {**(old.get("extra") or {}), **new_params["extra"]}
+            body["params"] = merged
+        job = client.call("POST", f"/jobs/{j}/model", json_body=body)
         if args.resume:
             job = client.call("POST", f"/jobs/{j}/resume")
-        jobs.append(_brief(job))
-    emit({"model": label, "resumed": args.resume, "jobs": jobs})
+        jobs.append({**_brief(job), "model": job.get("model_display_name"), "params": job.get("params")})
+    emit({"resumed": args.resume, "jobs": jobs})
     return 0
 
 
@@ -1022,8 +1040,11 @@ def cmd_join(args) -> int:
 # --------------------------------------------------------------------------- #
 # 参数解析
 # --------------------------------------------------------------------------- #
-def _add_model_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--model", required=True, help="模型的 name / display_name / id，或个人网关模型名")
+def _add_model_args(p: argparse.ArgumentParser, required: bool = True) -> None:
+    help_text = "模型的 name / display_name / id，或个人网关模型名"
+    if not required:
+        help_text += "；不填则沿用任务原来的模型"
+    p.add_argument("--model", required=required, help=help_text)
     p.add_argument("--personal", action="store_true", help="只在个人网关模型里找")
     p.add_argument("--system-prompt", help="任务级 system prompt（数据里已有 system 消息时一般不需要）")
     p.add_argument("--system-prompt-file")
@@ -1134,10 +1155,9 @@ def build_parser() -> argparse.ArgumentParser:
         _add_job_ids(p)
         p.set_defaults(func=cmd_control)
 
-    p = sub.add_parser("set-model", help="给已暂停/取消/失败的任务换模型，剩余条目改用新模型")
+    p = sub.add_parser("set-model", help="给已暂停/取消/失败的任务换模型或改参数，剩余条目按新配置跑")
     _add_job_ids(p)
-    p.add_argument("--model", required=True, help="模型的 name / display_name / id，或个人网关模型名")
-    p.add_argument("--personal", action="store_true", help="只在个人网关模型里找")
+    _add_model_args(p, required=False)
     p.add_argument("--resume", action="store_true", help="换完立即恢复（会继续消耗额度）")
     p.set_defaults(func=cmd_set_model)
 
