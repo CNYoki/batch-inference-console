@@ -20,6 +20,7 @@ from ..core.deps import DB, CurrentUser
 from ..core.security import decrypt_secret, encrypt_secret
 from ..models import (
     DOWNLOADABLE_STATUSES,
+    MODEL_EDITABLE_STATUSES,
     TERMINAL_STATUSES,
     Job,
     JobError,
@@ -35,9 +36,11 @@ from ..schemas import (
     JobDryRunOut,
     JobErrorOut,
     JobListOut,
+    JobModelChange,
     JobOut,
+    JobParams,
     JobPatch,
-    JobSubmission,
+    ModelSelection,
     UploadValidateOut,
 )
 from ..services import jsonl as jsonl_svc
@@ -235,7 +238,7 @@ async def create_job(payload: JobCreate, user: CurrentUser, db: DB) -> JobOut:
     final_path = settings.upload_dir / f"{job_id}.jsonl"
     shutil.move(str(src), final_path)
 
-    resolved = _resolve_job_params(mc, payload)
+    resolved = _resolve_job_params(mc, payload.params)
     priority = payload.priority if payload.priority != 100 else runtime.default_priority
     personal = payload.model_source == ModelSource.personal.value
 
@@ -302,7 +305,7 @@ async def dry_run(payload: JobDryRun, user: CurrentUser, db: DB) -> JobDryRunOut
         )
 
     # 和 worker 走同一套拼装逻辑，试跑才有意义
-    resolved = _resolve_job_params(mc, payload)
+    resolved = _resolve_job_params(mc, payload.params)
     system_prompt = resolved.get("_system_prompt")
     body = build_request_body(
         mc, item.body, {k: v for k, v in resolved.items() if not k.startswith("_")}, system_prompt,
@@ -319,7 +322,7 @@ async def dry_run(payload: JobDryRun, user: CurrentUser, db: DB) -> JobDryRunOut
     )
 
 
-async def _resolve_shared_model(payload: JobSubmission, user: User, db: DB) -> ModelConfig:
+async def _resolve_shared_model(payload: ModelSelection, user: User, db: DB) -> ModelConfig:
     mc = await db.get(ModelConfig, payload.model_config_id)
     if mc is None or not mc.enabled:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "模型不可用")
@@ -328,7 +331,7 @@ async def _resolve_shared_model(payload: JobSubmission, user: User, db: DB) -> M
     return mc
 
 
-async def _resolve_personal_model(payload: JobSubmission, user: User, db: DB) -> ModelConfig:
+async def _resolve_personal_model(payload: ModelSelection, user: User, db: DB) -> ModelConfig:
     """校验用户 token 对该模型确实有权限，并返回一个内存里的虚拟模型配置。"""
     runtime = await read_runtime(db)
     if not runtime["user_gateway_enabled"]:
@@ -359,9 +362,8 @@ async def _resolve_personal_model(payload: JobSubmission, user: User, db: DB) ->
     return build_personal_config(payload.personal_model, token, runtime)
 
 
-def _resolve_job_params(mc: ModelConfig, payload: JobSubmission) -> dict:
+def _resolve_job_params(mc: ModelConfig, p: JobParams) -> dict:
     """把前端参数与模型配置合并成 worker 直接可用的请求参数。"""
-    p = payload.params
     user_params: dict = {
         "temperature": p.temperature,
         "top_p": p.top_p,
@@ -636,6 +638,40 @@ async def resume_job(job_id: str, user: CurrentUser, db: DB) -> JobOut:
 
     await db.refresh(job, ["user", "model_config"])
     return _to_out(job, await _safe_position(job.id))
+
+
+@router.post("/{job_id}/model", response_model=JobOut)
+async def change_model(job_id: str, payload: JobModelChange, user: CurrentUser, db: DB) -> JobOut:
+    """给停下来的任务换模型，恢复后剩余条目改用新模型。
+
+    已完成的条目不会重跑，结果文件里会同时有新旧两个模型的输出。
+    推理参数沿用原任务提交时的那份，按新模型的默认值/强制值/白名单重新合并。
+    """
+    job = await _get_job_or_404(db, user, job_id)
+    if job.status not in MODEL_EDITABLE_STATUSES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "只有已暂停/已取消/失败的任务可以更换模型")
+
+    personal = payload.model_source == ModelSource.personal.value
+    if personal:
+        # worker 执行时用的是任务提交者本人的 token，校验也必须拿这个人的 token 做；
+        # 管理员替别人换成自己网关里的模型，排上队也跑不起来
+        if job.user_id != user.id:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "个人网关模型只能由任务提交者本人设置")
+        mc = await _resolve_personal_model(payload, user, db)
+    else:
+        mc = await _resolve_shared_model(payload, user, db)
+
+    job.model_source = ModelSource.personal if personal else ModelSource.shared
+    job.model_config_id = None if personal else mc.id
+    job.personal_model_name = payload.personal_model if personal else None
+    job.resolved_params = _resolve_job_params(mc, JobParams.model_validate(job.params or {}))
+    if job.concurrency:
+        # 原来的并发是按旧模型上限截过的，换了模型要按新上限再截一次
+        job.concurrency = min(job.concurrency, mc.max_concurrency)
+    await db.commit()
+
+    await db.refresh(job, ["user", "model_config"])
+    return _to_out(job)
 
 
 @router.post("/{job_id}/retry-failed", response_model=JobOut)

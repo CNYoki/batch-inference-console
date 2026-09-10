@@ -90,6 +90,10 @@ TERMINAL_STATUSES = {JobStatus.succeeded, JobStatus.completed, JobStatus.failed,
 # 中途下载会拿到不完整甚至截断的内容
 DOWNLOADABLE_STATUSES = {JobStatus.succeeded, JobStatus.completed, JobStatus.canceled}
 
+# 只有停下来、且不会再有 worker 在跑的任务才能换模型。
+# 运行中的 worker 手里握着旧配置，这时改库也不会生效
+MODEL_EDITABLE_STATUSES = {JobStatus.paused, JobStatus.canceled, JobStatus.failed}
+
 
 # --------------------------------------------------------------------------- #
 # 用户

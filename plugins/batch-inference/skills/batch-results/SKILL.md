@@ -63,6 +63,20 @@ bic errors <任务ID> --limit 20
 bic retry-failed <任务ID>
 ```
 
+## 更换模型
+
+任务处于 `paused`、`canceled` 或 `failed` 时可以换模型，比如原模型被下线、限流太严，或者想换个更强的模型。恢复后剩余条目用新模型跑，已完成的条目不会重跑，所以结果里会同时有新旧两个模型的输出。推理参数沿用原任务，按新模型的配置重新合并。
+
+换模型并恢复会继续消耗额度，**先征得用户同意**：
+
+```bash
+bic set-model <任务ID> --model <模型> --resume
+```
+
+- 不带 `--resume` 只换模型、不入队，之后再用 `bic resume <任务ID>` 恢复。
+- 个人网关模型只能换到自己的任务上。
+- 已失败的条目不会随恢复重跑；任务结束后用 `retry-failed` 重跑，这时用的也是新模型。
+
 ## 下载结果
 
 只有状态为 succeeded、completed 或 canceled 的任务才能下载。

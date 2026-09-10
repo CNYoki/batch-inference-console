@@ -351,12 +351,11 @@ class UploadValidateOut(BaseModel):
     duplicate_custom_ids: list[str] = Field(default_factory=list)
 
 
-class JobSubmission(BaseModel):
-    """建任务与试跑共用的部分：选哪个模型、用哪些参数、跑哪份上传。"""
+class ModelSelection(BaseModel):
+    """选哪个模型：建任务、试跑、给已有任务换模型共用。"""
 
     model_config = _ALLOW_MODEL_PREFIX
 
-    upload_id: str
     # shared：用管理员配置的公用模型，需要 model_config_id
     # personal：用自己的网关 token，需要 personal_model
     model_source: Literal["shared", "personal"] = "shared"
@@ -365,16 +364,26 @@ class JobSubmission(BaseModel):
     # 本次提交携带的网关 token；留空则用已保存的那个
     personal_token: str | None = Field(default=None, max_length=512)
     remember_token: bool = True
-    params: JobParams = Field(default_factory=JobParams)
 
     @model_validator(mode="after")
-    def _check_model_selection(self) -> JobSubmission:
+    def _check_model_selection(self) -> ModelSelection:
         if self.model_source == "shared":
             if not self.model_config_id:
                 raise ValueError("使用公用模型时必须指定 model_config_id")
         elif not self.personal_model:
             raise ValueError("使用个人模型时必须指定 personal_model")
         return self
+
+
+class JobSubmission(ModelSelection):
+    """建任务与试跑共用的部分：在选模型之外，再加上用哪些参数、跑哪份上传。"""
+
+    upload_id: str
+    params: JobParams = Field(default_factory=JobParams)
+
+
+class JobModelChange(ModelSelection):
+    """给暂停/取消/失败的任务换模型。推理参数沿用原任务的，按新模型重新合并。"""
 
 
 class JobCreate(JobSubmission):
