@@ -1038,3 +1038,104 @@ async def test_change_model_only_on_stopped_jobs_and_reresolves_params(
 
     async with session_scope() as db:
         await db.delete(await db.get(Job, job_id))
+
+
+# --------------------------------------------------------------------------- #
+# worker 被强杀后，暂停/取消要能直接落状态
+# --------------------------------------------------------------------------- #
+class _FakeControlQueue:
+    """只实现暂停/取消会用到的方法。workers: worker_id → 最近心跳时间。"""
+
+    def __init__(self, workers: dict[str, float]):
+        self.workers = workers
+        self.signals: dict[str, str] = {}
+
+    async def worker_last_seen(self, worker_id):
+        return self.workers.get(worker_id)
+
+    async def signal(self, job_id, action):
+        self.signals[job_id] = action
+
+    async def clear_signal(self, job_id):
+        self.signals.pop(job_id, None)
+
+    async def remove(self, job_id):
+        pass
+
+    async def get_progress_many(self, job_ids):
+        # Redis 里的实时进度比库里新
+        return {j: {"completed": "8", "failed": "1"} for j in job_ids}
+
+    async def queued_position(self, job_id):
+        return None
+
+
+async def _running_job(worker_id: str | None) -> str:
+    from sqlalchemy import select
+
+    from app.db import session_scope
+    from app.models import Job, JobStatus, User
+
+    async with session_scope() as db:
+        user = (await db.execute(select(User).where(User.username == "admin"))).scalar_one()
+        job = Job(
+            name="卡住的任务", user_id=user.id, status=JobStatus.running, worker_id=worker_id,
+            input_filename="a.jsonl", input_path="/tmp/none.jsonl", total_items=20, completed_items=5,
+        )
+        db.add(job)
+        await db.flush()
+        return job.id
+
+
+@pytest.mark.asyncio
+async def test_pause_and_cancel_settle_jobs_whose_worker_is_gone(
+    admin_client: AsyncClient, monkeypatch
+):
+    """重建镜像时 worker 在收尾前被强杀，没人响应信号，任务不能永远卡在「运行中」。"""
+    import time
+
+    import app.api.jobs as jobs_mod
+    from app.db import session_scope
+    from app.models import Job
+
+    fake = _FakeControlQueue({"alive": time.time() - 5, "stale": time.time() - 120})
+    monkeypatch.setattr(jobs_mod, "queue", fake)
+    created: list[str] = []
+
+    # worker 还活着：照旧只发信号，由 worker 自己收尾
+    alive = await _running_job("alive")
+    created.append(alive)
+    out = (await admin_client.post(f"/api/jobs/{alive}/pause")).json()
+    assert out["status"] == "running" and fake.signals[alive] == "pause"
+
+    # worker 已经不在了：直接落暂停，计数取 Redis 里更新的那份
+    gone = await _running_job("killed-worker")
+    created.append(gone)
+    out = (await admin_client.post(f"/api/jobs/{gone}/pause")).json()
+    assert out["status"] == "paused" and out["worker_id"] is None
+    assert out["completed_items"] == 8 and out["failed_items"] == 1
+    # 信号留着：万一 worker 其实还活着，看到信号仍会停下
+    assert fake.signals[gone] == "pause"
+    # 落成暂停之后，取消走的就是「已暂停」那条正常路径
+    out = (await admin_client.post(f"/api/jobs/{gone}/cancel")).json()
+    assert out["status"] == "canceled" and gone not in fake.signals
+
+    # 心跳超时的 worker：取消直接落终态
+    stale = await _running_job("stale")
+    created.append(stale)
+    out = (await admin_client.post(f"/api/jobs/{stale}/cancel")).json()
+    assert out["status"] == "canceled" and out["finished_at"]
+
+    # 读不到心跳（Redis 抖动）时宁可不动，免得把正在跑的任务误改掉
+    async def boom(worker_id):
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr(fake, "worker_last_seen", boom)
+    flaky = await _running_job("whatever")
+    created.append(flaky)
+    out = (await admin_client.post(f"/api/jobs/{flaky}/cancel")).json()
+    assert out["status"] == "running"
+
+    async with session_scope() as db:
+        for jid in created:
+            await db.delete(await db.get(Job, jid))

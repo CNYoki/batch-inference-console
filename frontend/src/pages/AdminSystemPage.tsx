@@ -7,7 +7,7 @@ import type { ColumnsType } from 'antd/es/table'
 import { ReloadOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import type {
-  Dashboard, MailTestResult, MyUsage, RetentionPreview, SystemSettings, WorkerInfo,
+  Dashboard, MailTestResult, ModelJobLimit, MyUsage, RetentionPreview, SystemSettings, WorkerInfo,
 } from '../api'
 import { usePolling } from '../hooks/usePolling'
 import {
@@ -149,6 +149,12 @@ export default function AdminSystemPage() {
             payload: parseJson(r.payload),
             effort_options: r.effort_options ?? [],
             default_effort: r.default_effort ?? '',
+          })),
+        model_job_limits: (values.model_job_limits ?? [])
+          .filter((r: ModelJobLimit) => r?.pattern?.trim())
+          .map((r: ModelJobLimit) => ({
+            pattern: r.pattern.trim(),
+            max_running_jobs: r.max_running_jobs ?? 0,
           })),
         smtp_enabled: values.smtp_enabled,
         smtp_host: values.smtp_host,
@@ -441,6 +447,45 @@ export default function AdminSystemPage() {
           </Form.List>
 
           <Button type="primary" loading={saving} onClick={() => void saveSettings()}>保存网关设置</Button>
+        </Form>
+      </Card>
+
+      <Card title="单模型同时运行任务数">
+        <Form form={form} layout="vertical" style={{ maxWidth: 720 }}>
+          <Typography.Paragraph type="secondary">
+            限制同一个模型同时在跑的任务数，所有 worker 合计。按真实模型名匹配：公用模型看配置里的「模型名」，
+            个人网关模型看网关里的模型名，两边同名的算同一个模型。支持 <code>*</code> 通配，
+            <b>按顺序取第一条命中的</b>，每个模型名单独计数；上限填 0 表示不限。
+            超出上限的任务留在队列里等名额，排在后面的其他模型任务照常先跑。
+          </Typography.Paragraph>
+          <Form.List name="model_job_limits">
+            {(fields, { add, remove }) => (
+              <>
+                {fields.map(({ key, name, ...rest }) => (
+                  <Space key={key} size={16} align="start" wrap>
+                    <Form.Item {...rest} name={[name, 'pattern']} label="模型名"
+                      rules={[{ required: true, whitespace: true, message: '填模型名或通配符' }]}>
+                      <Input className="mono" placeholder="qwen3.8-27b" style={{ width: 260 }} />
+                    </Form.Item>
+                    <Form.Item {...rest} name={[name, 'max_running_jobs']} label="最多同时运行"
+                      rules={[{ required: true, message: '填上限' }]}>
+                      <InputNumber min={0} max={1000} addonAfter="个任务" style={{ width: 170 }} />
+                    </Form.Item>
+                    <Form.Item label=" " colon={false}>
+                      <Button danger onClick={() => remove(name)}>删除</Button>
+                    </Form.Item>
+                  </Space>
+                ))}
+                <div>
+                  <Button type="dashed" onClick={() => add({ max_running_jobs: 4 })}
+                    style={{ marginBottom: 16 }}>
+                    + 添加模型
+                  </Button>
+                </div>
+              </>
+            )}
+          </Form.List>
+          <Button type="primary" loading={saving} onClick={() => void saveSettings()}>保存设置</Button>
         </Form>
       </Card>
 

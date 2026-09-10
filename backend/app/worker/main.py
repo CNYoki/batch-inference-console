@@ -17,8 +17,10 @@ import uuid
 
 from ..config import settings
 from ..db import engine, session_scope
-from ..services.queue import queue
+from ..services.model_limits import job_limit_for, job_model_names
+from ..services.queue import CLAIM_BLOCKED, CLAIM_OK, queue
 from ..services.retention import sweep
+from ..services.settings_store import read_runtime
 from ..services.storage import backfill_result_sizes
 from .runner import JobRunner
 
@@ -31,6 +33,9 @@ REAP_SECONDS = 30.0
 # 让崩溃的 worker 先以超时状态露个面，方便发现问题
 DEAD_WORKER_SECONDS = 600.0
 RETENTION_SECONDS = 3600.0   # 保留期清理的扫描间隔
+# 领任务时每次看队列里多少个、最多往后看多少个。前面的都被单模型上限挡住时往后找
+CLAIM_PAGE = 100
+CLAIM_SCAN_MAX = 2000
 
 
 class Worker:
@@ -90,7 +95,7 @@ class Worker:
                 await self._wait_any(timeout=IDLE_SLEEP)
                 continue
             try:
-                job_id = await queue.claim(self.id)
+                job_id = await self._claim()
             except Exception as exc:  # noqa: BLE001 — Redis 抖动时退避重试
                 log.warning("领取任务失败: %s", exc)
                 await asyncio.sleep(2.0)
@@ -103,6 +108,33 @@ class Worker:
             log.info("领取任务 %s", job_id)
             task = asyncio.create_task(self._run_job(job_id))
             self.running[job_id] = task
+
+    async def _claim(self) -> str | None:
+        """按优先级领一个任务。
+
+        所属模型同时在跑的任务数已到上限的先跳过、往后找，
+        免得一个被限流的模型把整条队列堵死。
+        """
+        rules: list[dict] | None = None
+        blocked: set[str] = set()
+        for offset in range(0, CLAIM_SCAN_MAX, CLAIM_PAGE):
+            candidates = await queue.peek(offset, CLAIM_PAGE)
+            if not candidates:
+                return None
+            async with session_scope() as db:
+                if rules is None:
+                    rules = (await read_runtime(db)).get("model_job_limits") or []
+                models = await job_model_names(db, candidates)
+            for job_id in candidates:
+                model = models.get(job_id, "")
+                if model in blocked:
+                    continue
+                result = await queue.claim_job(job_id, self.id, model, job_limit_for(model, rules))
+                if result == CLAIM_OK:
+                    return job_id
+                if result == CLAIM_BLOCKED:
+                    blocked.add(model)
+        return None
 
     async def _run_job(self, job_id: str) -> None:
         try:
