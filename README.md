@@ -52,6 +52,9 @@ Browser ──► API (FastAPI) ──► MySQL / PostgreSQL   (metadata, state)
 - Script generator: describe your local CSV / JSONL / Parquet data in the UI and download a
   standalone Python script that converts and splits it into upload-ready JSONL — your data
   never leaves your machine
+- Personal API tokens plus a dependency-free CLI and a Claude Code plugin, so the whole
+  prepare → upload → dry run → submit → merge results loop can run from a local terminal
+  (see [Command line and Claude Code](#command-line-and-claude-code))
 
 ## Stack
 
@@ -216,6 +219,50 @@ is never locked out. An existing local account with the same username is linked 
 duplicated. When `OIDC_ADMIN_GROUP` is set, role membership syncs **both ways** — except that the
 last remaining active admin is never demoted. `groups` must be in `OIDC_SCOPES` or the claim never
 arrives and admin sync silently does nothing.
+
+## Command line and Claude Code
+
+OIDC users have no password to script with, so the console issues **personal API tokens**.
+**Profile → API Token** creates one: the plaintext is shown once, only a SHA-256 hash is stored,
+and expiry ranges from 30 days to never. Every endpoint accepts it as
+`Authorization: Bearer bic_…`, with the user's normal permissions. Two deliberate limits: a token
+cannot create or revoke tokens (that needs a browser session, so a leaked token can't renew
+itself), and disabling a user cuts off their tokens immediately. Run `make migrate` after
+upgrading — it adds the `api_tokens` table.
+
+The token page shows a one-line command that writes `~/.config/bic/config.json`; the
+`BIC_URL` / `BIC_TOKEN` environment variables override it.
+
+**CLI** — `plugins/batch-inference/scripts/bic.py` is a single file with no dependencies
+(Python 3.9+; `pyarrow` only for Parquet). Every command prints JSON on stdout:
+
+```bash
+bic.py inspect data.csv --schema-only        # columns, types, encoding — offline
+bic.py prep --config prep.json --limit 20    # the platform generates the split script; it runs locally
+bic.py upload batch_input/                   # validates every line, writes bic_manifest.json
+bic.py dry-run --manifest batch_input/bic_manifest.json --model qwen3
+bic.py submit --manifest batch_input/bic_manifest.json --model qwen3 --name reviews        # prints the plan only
+bic.py submit --manifest batch_input/bic_manifest.json --model qwen3 --name reviews --yes  # one job per shard
+bic.py wait --manifest batch_input/bic_manifest.json
+bic.py download --manifest batch_input/bic_manifest.json -o results
+bic.py join --config batch_input/bic_prep_config.json --results results/*.jsonl -o merged.csv
+```
+
+`join` rebuilds each `custom_id` with the same rules as the generated script, so results line up
+with source rows even though they arrive in completion order. Rows skipped during preparation
+show up as `missing`.
+
+**Claude Code plugin** — this repository is also a plugin marketplace:
+
+```text
+/plugin marketplace add CNYoki/batch-inference-console
+/plugin install batch-inference@batch-inference-console
+```
+
+It ships three skills — `batch-prep`, `batch-submit` and `batch-results` — that drive the CLI.
+They read column schemas before any data values and ask before reading sample rows, never pass
+`--yes` to `submit` without explicit confirmation, and tell users to paste tokens into their own
+terminal rather than the chat.
 
 ## Development
 
