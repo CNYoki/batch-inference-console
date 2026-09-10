@@ -5,6 +5,7 @@ import itertools
 import logging
 import re
 import shutil
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -50,7 +51,7 @@ from ..services.inference import InferenceClient, build_request_body, resolve_pa
 from ..services.queue import queue
 from ..services.settings_store import read_runtime
 from ..services.storage import QUOTA_MESSAGE, check_before_upload
-from .admin_settings import get_runtime_settings
+from .admin_settings import WORKER_STALE_SECONDS, get_runtime_settings
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -580,17 +581,53 @@ async def patch_job(job_id: str, payload: JobPatch, user: CurrentUser, db: DB) -
     return _to_out(job, await _safe_position(job.id))
 
 
+async def _worker_gone(worker_id: str | None) -> bool:
+    """任务名下的 worker 是否已经没了心跳（被强杀、OOM、宕机）。
+
+    这种任务没有谁会响应暂停/取消信号，只能由接口直接落状态，否则会永远卡在「运行中」。
+    Redis 读不到时按「还活着」处理 —— 宁可让用户过会儿再点，也不能把正在跑的任务误改掉。
+    """
+    if not worker_id:
+        return True
+    try:
+        last_seen = await queue.worker_last_seen(worker_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("读取 worker %s 心跳失败: %s", worker_id, exc)
+        return False
+    return last_seen is None or time.time() - last_seen >= WORKER_STALE_SECONDS
+
+
+async def _settle_orphan(job: Job, new_status: JobStatus) -> None:
+    """替已经没了的 worker 收尾。
+
+    计数取库里与 Redis 实时进度中较大的：worker 每 10s 才写一次库，Redis 里的更接近真实值。
+    恢复时还会按结果文件重新统计，这里差一点也不影响续跑。
+    """
+    live = (await _safe_progress_many([job.id])).get(job.id) or {}
+    job.completed_items = max(job.completed_items, int(float(live.get("completed", 0))))
+    job.failed_items = max(job.failed_items, int(float(live.get("failed", 0))))
+    job.status = new_status
+    job.worker_id = None
+    if new_status == JobStatus.canceled:
+        job.finished_at = datetime.now(UTC)
+
+
 @router.post("/{job_id}/cancel", response_model=JobOut)
 async def cancel_job(job_id: str, user: CurrentUser, db: DB) -> JobOut:
     job = await _get_job_or_404(db, user, job_id)
     if job.status in TERMINAL_STATUSES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "任务已结束，无法取消")
+    orphaned = job.status == JobStatus.running and await _worker_gone(job.worker_id)
 
     await queue.signal(job.id, "cancel")
     await queue.remove(job.id)
 
-    # 排队中的任务不会有 worker 来响应信号，这里直接落终态
-    if job.status in {JobStatus.queued, JobStatus.pending, JobStatus.paused}:
+    if orphaned:
+        await _settle_orphan(job, JobStatus.canceled)
+        await db.commit()
+        # 信号留着：万一 worker 只是卡顿、其实还活着，看到信号仍会自己停下
+    elif job.status in {JobStatus.queued, JobStatus.pending, JobStatus.paused}:
+        # 排队中的任务不会有 worker 来响应信号，这里直接落终态
         job.status = JobStatus.canceled
         job.finished_at = datetime.now(UTC)
         await db.commit()
@@ -605,10 +642,14 @@ async def pause_job(job_id: str, user: CurrentUser, db: DB) -> JobOut:
     job = await _get_job_or_404(db, user, job_id)
     if job.status not in {JobStatus.running, JobStatus.queued}:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "只有排队中或运行中的任务可以暂停")
+    orphaned = job.status == JobStatus.running and await _worker_gone(job.worker_id)
 
     await queue.signal(job.id, "pause")
     await queue.remove(job.id)
-    if job.status == JobStatus.queued:
+    if orphaned:
+        await _settle_orphan(job, JobStatus.paused)
+        await db.commit()
+    elif job.status == JobStatus.queued:
         job.status = JobStatus.paused
         await db.commit()
         await queue.clear_signal(job.id)

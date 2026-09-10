@@ -35,6 +35,9 @@ Browser ──► API (FastAPI) ──► MySQL / PostgreSQL   (metadata, state)
 **Models**
 - Admin-configured **shared models**: endpoint, encrypted API key, sampling defaults, forced
   parameters, allow-list of user-overridable keys, concurrency / RPM / TPM limits, retries
+- **Per-model job limit**: cap how many jobs may run at once on a given model name (across all
+  workers, `*` wildcards allowed); jobs over the limit wait in the queue while other models' jobs
+  go ahead
 - **Personal gateway**: users supply their own token, the platform fetches the models that token
   is authorised for, and jobs run under their identity and quota
 - Reasoning/thinking toggle per model: pick the request-body fragment from presets

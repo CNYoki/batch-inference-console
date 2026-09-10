@@ -204,8 +204,8 @@ async def test_heartbeat_survives_drain(monkeypatch):
         async def renew_lease(self, job_id):
             pass
 
-        async def claim(self, worker_id):
-            return None
+        async def peek(self, offset, count):
+            return []
 
         async def drop_worker(self, worker_id):
             pass

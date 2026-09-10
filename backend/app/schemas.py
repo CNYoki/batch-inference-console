@@ -210,6 +210,25 @@ class GatewayReasoningRule(BaseModel):
     default_effort: str = Field(default="", max_length=32)
 
 
+class ModelJobLimit(BaseModel):
+    """按模型名限制所有 worker 合计同时在跑的任务数。
+
+    匹配真实模型名（公用模型的 model_name / 个人网关模型名），pattern 支持 * 通配，
+    按顺序取第一条命中的；每个模型名单独计数。0 表示不限，可用来给通配规则开例外。
+    """
+
+    pattern: str = Field(min_length=1, max_length=255)
+    max_running_jobs: int = Field(ge=0, le=1000)
+
+    @field_validator("pattern")
+    @classmethod
+    def _strip_pattern(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("模型名不能为空")
+        return v
+
+
 class PersonalReasoningCap(BaseModel):
     """个人模型的推理能力声明，由后端按规则算好给前端用。"""
 
@@ -636,6 +655,9 @@ class SystemSettingsOut(BaseModel):
     # 按模型名覆盖上面那份默认配置，先命中先生效
     user_gateway_reasoning_rules: list[GatewayReasoningRule] = Field(default_factory=list)
 
+    # ---- 单模型同时运行的任务数上限 ----
+    model_job_limits: list[ModelJobLimit] = Field(default_factory=list)
+
     # ---- 文件保留期 ----
     file_retention_days: int = 0
     purge_input_files: bool = True
@@ -697,6 +719,7 @@ class SystemSettingsUpdate(BaseModel):
     user_gateway_reasoning_rules: list[GatewayReasoningRule] | None = Field(
         default=None, max_length=50
     )
+    model_job_limits: list[ModelJobLimit] | None = Field(default=None, max_length=100)
 
     file_retention_days: int | None = Field(default=None, ge=0, le=3650)
     purge_input_files: bool | None = None

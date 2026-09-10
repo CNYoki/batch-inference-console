@@ -198,6 +198,12 @@ export interface Dashboard {
   active_models: number
 }
 
+/** 单模型同时运行的任务数上限；pattern 按真实模型名匹配，支持 * 通配，0 = 不限 */
+export interface ModelJobLimit {
+  pattern: string
+  max_running_jobs: number
+}
+
 export interface SystemSettings {
   allow_new_jobs: boolean
   max_upload_mb: number
@@ -217,6 +223,8 @@ export interface SystemSettings {
   user_gateway_reasoning_effort_options: string[]
   user_gateway_reasoning_default_effort: string
   user_gateway_reasoning_rules: GatewayReasoningRule[]
+
+  model_job_limits: ModelJobLimit[]
 
   file_retention_days: number
   purge_input_files: boolean

@@ -43,6 +43,11 @@ DEFAULTS: dict = {
     #   "effort_options": [...], "default_effort": "medium"}]
     # pattern 支持 * 通配，按顺序取第一条命中的
     "user_gateway_reasoning_rules": [],
+    # ---- 单模型同时运行的任务数上限（所有 worker 合计）----
+    # 按真实模型名匹配：公用模型取配置里的 model_name，个人网关模型取网关里的模型名。
+    # [{"pattern": "qwen3.8-27b", "max_running_jobs": 4}]
+    # pattern 支持 * 通配，按顺序取第一条命中的；每个模型名单独计数，0 = 不限
+    "model_job_limits": [],
     # ---- 文件保留期 ----
     # 终态任务（成功/完成/失败/取消）的输入与结果文件保留多少天，0 = 永久保留。
     # 到期后由 worker 自动清除文件，任务记录与统计保留。
