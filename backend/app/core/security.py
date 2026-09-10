@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import secrets
 from datetime import UTC, datetime, timedelta
 
 import bcrypt
@@ -50,6 +51,22 @@ def decode_session_token(token: str) -> dict | None:
         return jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
     except jwt.PyJWTError:
         return None
+
+
+# --------------------------------------------------------------------------- #
+# 个人 API Token
+# --------------------------------------------------------------------------- #
+# 固定前缀让鉴权时一眼区分 token 与会话 JWT，泄露到日志或仓库里也容易被扫描出来
+API_TOKEN_PREFIX = "bic_"
+
+
+def generate_api_token() -> str:
+    return API_TOKEN_PREFIX + secrets.token_urlsafe(32)
+
+
+def hash_api_token(token: str) -> str:
+    # 256 bit 随机串不怕彩虹表，SHA-256 足够，而且每个请求都要算，不能用 bcrypt
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 # --------------------------------------------------------------------------- #
