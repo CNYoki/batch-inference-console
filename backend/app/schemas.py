@@ -402,7 +402,13 @@ class JobSubmission(ModelSelection):
 
 
 class JobModelChange(ModelSelection):
-    """给暂停/取消/失败的任务换模型。推理参数沿用原任务的，按新模型重新合并。"""
+    """给暂停/取消/失败的任务换模型、改推理参数。
+
+    模型没变就只是改参数。params 不传则沿用原任务的，传了就整份替换；
+    两种情况都会按（新）模型的默认值/强制值/白名单重新合并。
+    """
+
+    params: JobParams | None = None
 
 
 class JobCreate(JobSubmission):

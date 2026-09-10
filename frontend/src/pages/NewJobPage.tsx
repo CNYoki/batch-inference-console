@@ -2,18 +2,17 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Alert, App, Button, Card, Col, Collapse, Descriptions, Divider, Form, Input, InputNumber,
-  Modal, Progress, Row, Select, Slider, Space, Spin, Steps, Switch, Tag, Typography, Upload,
+  Modal, Progress, Row, Select, Space, Spin, Steps, Switch, Typography, Upload,
 } from 'antd'
 import { InboxOutlined, KeyOutlined, ReloadOutlined } from '@ant-design/icons'
 import type { UploadFile } from 'antd/es/upload/interface'
 import { api } from '../api'
 import type {
-  DryRunResult, ModelOption, ModelOptions, MyUsage, PersonalReasoningCap, SystemSettings,
-  UploadResult,
+  DryRunResult, ModelOption, ModelOptions, MyUsage, SystemSettings, UploadResult,
 } from '../api'
+import JobParamsFields, { formToParams } from '../components/JobParamsFields'
 import { formatBytes, formatNumber } from '../utils'
-import { defaultEffort, sortEfforts } from '../reasoning'
-import { buildModelGroups, filterModelOption, parseSelection } from '../modelSelect'
+import { buildModelGroups, capsFor, filterModelOption, parseSelection } from '../modelSelect'
 
 const SAMPLE = `{"custom_id": "req-1", "body": {"messages": [{"role": "user", "content": "把这句话翻译成英文：珞珈山下，清风徐来。"}]}}
 {"custom_id": "req-2", "messages": [{"role": "user", "content": "总结这段文字……"}]}
@@ -33,49 +32,6 @@ type DryState = {
 function errorDetail(err: unknown): string | undefined {
   const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
   return typeof detail === 'string' ? detail : undefined
-}
-
-/**
- * 个人模型拿不到能力声明，采样参数按最宽松处理，由网关自己拒绝不支持的；
- * 推理部分则用后端按模型名规则算好的 cap，拿不到才退回网关默认配置。
- */
-function personalCaps(settings: SystemSettings | null, cap?: PersonalReasoningCap) {
-  const fallbackMode = (settings?.user_gateway_reasoning_enabled ?? true) ? 'optional' : 'off'
-  return {
-    supports_temperature: true,
-    supports_system_prompt: true,
-    supports_json_mode: true,
-    // 推理开关默认可切换、默认关闭；管理员可以整体关掉，也可以按模型名关掉
-    reasoning_mode: (cap?.reasoning_mode ?? fallbackMode) as 'off' | 'optional',
-    reasoning_effort_options:
-      cap?.effort_options ?? settings?.user_gateway_reasoning_effort_options ?? [],
-    reasoning_default_effort:
-      cap?.default_effort ?? settings?.user_gateway_reasoning_default_effort ?? '',
-    max_concurrency: settings?.user_gateway_max_concurrency ?? 0,
-    max_tokens_cap: settings?.user_gateway_max_tokens_cap ?? 0,
-  }
-}
-
-/**
- * 推理档位滑动条。表单里存的是档位字符串，滑块按名单下标定位，
- * step=null 让它只停在刻度上。
- */
-function EffortSlider(
-  { options, value, onChange }:
-  { options: string[]; value?: string; onChange?: (v: string) => void },
-) {
-  if (options.length < 2) return <Tag color="purple">{value ?? options[0]}</Tag>
-  const index = Math.max(0, options.indexOf(value ?? ''))
-  return (
-    <Slider
-      min={0} max={options.length - 1} step={null} value={index}
-      marks={Object.fromEntries(options.map(
-        (o, i) => [i, <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{o}</span>],
-      ))}
-      tooltip={{ open: false }}
-      onChange={(v) => onChange?.(options[v as number])}
-    />
-  )
 }
 
 export default function NewJobPage() {
@@ -101,7 +57,6 @@ export default function NewJobPage() {
 
   const selectedValue = Form.useWatch('model', form) as string | undefined
   const selection = useMemo(() => parseSelection(selectedValue), [selectedValue])
-  const reasoningOn = Form.useWatch('reasoning', form) as boolean | undefined
 
   const loadOptions = useCallback(async () => {
     const data = await api.modelOptions()
@@ -122,19 +77,7 @@ export default function NewJobPage() {
       : undefined),
     [options, selection],
   )
-  // 公用模型用它自己的能力声明，个人模型用网关按模型名算出来的那份
-  const caps = selection?.source === 'personal'
-    ? personalCaps(settings, options?.personal_reasoning?.[selection.key])
-    : sharedModel
-
-  const effortOptions = useMemo(
-    () => sortEfforts(caps?.reasoning_effort_options ?? []), [caps],
-  )
-  const effortFallback = defaultEffort(effortOptions, caps?.reasoning_default_effort)
-  useEffect(() => {
-    // 换模型后档位名单可能完全不同，统一回到该模型的默认档
-    form.setFieldValue('reasoning_effort', effortFallback)
-  }, [form, effortFallback])
+  const caps = useMemo(() => capsFor(selection, options, settings), [selection, options, settings])
 
   const fetchPersonalModels = async () => {
     if (!token.trim()) {
@@ -220,9 +163,9 @@ export default function NewJobPage() {
       return
     }
 
-    let extra: Record<string, unknown>
+    let params: Record<string, unknown>
     try {
-      extra = values.extra ? JSON.parse(values.extra) : {}
+      params = formToParams(values)
     } catch {
       message.error('「附加参数」不是合法 JSON')
       return
@@ -239,17 +182,7 @@ export default function NewJobPage() {
       remember_token: rememberToken,
       concurrency: values.concurrency ?? 0,
       priority: values.priority ?? 100,
-      params: {
-        system_prompt: values.system_prompt || null,
-        temperature: values.temperature,
-        top_p: values.top_p,
-        max_tokens: values.max_tokens,
-        seed: values.seed,
-        json_mode: !!values.json_mode,
-        reasoning: !!values.reasoning,
-        reasoning_effort: values.reasoning_effort || null,
-        extra,
-      },
+      params,
     }
 
     setDry({ phase: 'running', job })
@@ -466,90 +399,20 @@ export default function NewJobPage() {
                 <Input placeholder="例：数据标注-chunk1" maxLength={255} />
               </Form.Item>
 
-              {caps?.supports_system_prompt !== false && (
-                <Form.Item name="system_prompt" label="System Prompt（可选）"
-                  extra="会作为 system 消息注入到每一条请求；不覆盖数据中的 system 消息。">
-                  <Input.TextArea rows={3} maxLength={20000} showCount
-                    placeholder="例：你是一名严谨的数据标注员，只输出 JSON。" />
-                </Form.Item>
-              )}
-
-              <Row gutter={16}>
-                {caps?.supports_temperature !== false && (
-                  <Col span={12}>
-                    <Form.Item name="temperature" label="temperature">
-                      <Slider min={0} max={2} step={0.1} marks={{ 0: '0', 1: '1', 2: '2' }} />
-                    </Form.Item>
-                  </Col>
-                )}
-                <Col span={12}>
-                  <Form.Item name="max_tokens" label="max_tokens"
-                    extra={caps?.max_tokens_cap ? `上限 ${formatNumber(caps.max_tokens_cap)}` : undefined}>
-                    <InputNumber min={1} max={caps?.max_tokens_cap || 200000}
-                      style={{ width: '100%' }} placeholder="留空则使用模型默认值" />
-                  </Form.Item>
-                </Col>
-              </Row>
-
-              <Row gutter={16}>
-                <Col span={8}>
-                  <Form.Item name="top_p" label="top_p">
-                    <InputNumber min={0} max={1} step={0.05} style={{ width: '100%' }} placeholder="可选" />
-                  </Form.Item>
-                </Col>
-                <Col span={8}>
-                  <Form.Item name="seed" label="seed">
-                    <InputNumber style={{ width: '100%' }} placeholder="可选" />
-                  </Form.Item>
-                </Col>
-                <Col span={8}>
+              <JobParamsFields
+                form={form}
+                caps={caps}
+                rowExtra={
                   <Form.Item name="concurrency" label="并发数" extra="0 表示按模型配置">
                     <InputNumber min={0} max={sharedModel?.max_concurrency ?? 64}
                       style={{ width: '100%' }} />
                   </Form.Item>
-                </Col>
-              </Row>
-
-              <Space size={24} wrap style={{ marginBottom: 16 }}>
-                {caps?.supports_json_mode && (
-                  <Form.Item name="json_mode" label="JSON 输出模式" valuePropName="checked"
-                    style={{ marginBottom: 0 }}>
-                    <Switch />
+                }
+                advanced={
+                  <Form.Item name="priority" label="优先级" extra="数值越小优先级越大">
+                    <InputNumber min={0} max={1000} style={{ width: 160 }} />
                   </Form.Item>
-                )}
-                {caps?.reasoning_mode === 'optional' && (
-                  <Form.Item name="reasoning" label="开启深度推理" valuePropName="checked"
-                    style={{ marginBottom: 0 }}>
-                    <Switch />
-                  </Form.Item>
-                )}
-                {caps?.reasoning_mode === 'forced' && <Tag color="purple">该模型始终开启深度推理</Tag>}
-              </Space>
-
-              {!!effortOptions.length && (caps?.reasoning_mode === 'forced' || reasoningOn) && (
-                <Form.Item name="reasoning_effort" label="推理档位"
-                  style={{ maxWidth: 480, marginBottom: 16 }}>
-                  <EffortSlider options={effortOptions} />
-                </Form.Item>
-              )}
-
-              <Collapse
-                size="small"
-                items={[{
-                  key: 'adv',
-                  label: '高级选项',
-                  children: (
-                    <>
-                      <Form.Item name="priority" label="优先级" extra="数值越小优先级越大">
-                        <InputNumber min={0} max={1000} style={{ width: 160 }} />
-                      </Form.Item>
-                      <Form.Item name="extra" label="附加请求参数 (JSON)"
-                        extra="会合并进每条请求体，例如 {&quot;response_format&quot;: {&quot;type&quot;: &quot;json_object&quot;}}">
-                        <Input.TextArea rows={3} placeholder="{}" className="mono" />
-                      </Form.Item>
-                    </>
-                  ),
-                }]}
+                }
               />
 
               <Divider />
