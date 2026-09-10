@@ -71,6 +71,28 @@ def test_reasoning_optional_only_applies_when_requested():
     assert resolve_params(mc, {"reasoning": True})["reasoning_effort"] == "high"
 
 
+def test_reasoning_off_payload_applies_when_reasoning_not_on():
+    """Qwen3 这类默认会思考的模型，没开推理时得明确发 enable_thinking: false。"""
+    mc = make_mc(
+        reasoning_mode="optional",
+        reasoning_payload={"chat_template_kwargs": {"enable_thinking": True}},
+        reasoning_off_payload={"chat_template_kwargs": {"enable_thinking": False}},
+        default_params={"chat_template_kwargs": {"foo": 1}},
+    )
+    # 没打开：带关闭片段，嵌套字段与已有值合并
+    assert resolve_params(mc, {}) == {"chat_template_kwargs": {"foo": 1, "enable_thinking": False}}
+    # 打开了：只带开启片段
+    assert resolve_params(mc, {"reasoning": True}) == {
+        "chat_template_kwargs": {"foo": 1, "enable_thinking": True},
+    }
+    # 模型不支持推理：前端硬传 reasoning=true 也照样发关闭片段
+    mc.reasoning_mode = "off"
+    assert resolve_params(mc, {"reasoning": True})["chat_template_kwargs"]["enable_thinking"] is False
+    # 强制开启的模型永远不带关闭片段
+    mc.reasoning_mode = "forced"
+    assert resolve_params(mc, {})["chat_template_kwargs"]["enable_thinking"] is True
+
+
 def test_reasoning_forced_always_applies():
     mc = make_mc(reasoning_mode="forced", reasoning_payload={"enable_thinking": True})
     assert resolve_params(mc, {})["enable_thinking"] is True

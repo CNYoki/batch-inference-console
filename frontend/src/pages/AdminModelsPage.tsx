@@ -13,7 +13,9 @@ import {
 
 type ProbeState = Record<string, { ok: boolean; text: string } | 'loading'>
 
-const JSON_FIELDS = ['default_params', 'forced_params', 'reasoning_payload', 'extra_headers'] as const
+const JSON_FIELDS = [
+  'default_params', 'forced_params', 'reasoning_payload', 'reasoning_off_payload', 'extra_headers',
+] as const
 
 export default function AdminModelsPage() {
   const { modal, message } = App.useApp()
@@ -55,7 +57,7 @@ export default function AdminModelsPage() {
         reasoning_mode: 'off', max_concurrency: 8, rpm_limit: 0, tpm_limit: 0,
         request_timeout: 300, max_retries: 3, max_tokens_cap: 0, sort_order: 0,
         default_params: '{\n  "temperature": 0.7\n}', forced_params: '{}',
-        reasoning_payload: '{}', extra_headers: '{}',
+        reasoning_payload: '{}', reasoning_off_payload: '{}', extra_headers: '{}',
         reasoning_preset: CUSTOM_PRESET, reasoning_effort_options: [], reasoning_default_effort: '',
       })
     }
@@ -71,6 +73,7 @@ export default function AdminModelsPage() {
     if (!preset) return
     form.setFieldsValue({
       reasoning_payload: JSON.stringify(preset.payload, null, 2),
+      reasoning_off_payload: JSON.stringify(preset.offPayload, null, 2),
       reasoning_effort_options: [...preset.effortOptions],
       reasoning_default_effort: preset.defaultEffort,
     })
@@ -333,11 +336,15 @@ export default function AdminModelsPage() {
                   <Select mode="tags" placeholder="temperature, max_tokens …" />
                 </Form.Item>
                 <Form.Item name="reasoning_preset" label="推理请求体写法"
-                  extra="选一个常见写法自动填好下面两项，也可以选「自定义」自己写">
+                  extra="选一个常见写法自动填好下面几项，也可以选「自定义」自己写">
                   <Select options={PRESET_SELECT_OPTIONS} onChange={applyPreset} />
                 </Form.Item>
                 <Form.Item name="reasoning_payload" label="开启推理时附加的请求体"
                   extra='例：{"chat_template_kwargs": {"enable_thinking": true}}；写 "$effort" 的位置会被换成用户选的档位'>
+                  <Input.TextArea rows={3} className="mono" />
+                </Form.Item>
+                <Form.Item name="reasoning_off_payload" label="关闭推理时附加的请求体"
+                  extra='推理「不支持」，或「可选」但用户没打开时附加，强制开启时不附加。例：{"chat_template_kwargs": {"enable_thinking": false}}'>
                   <Input.TextArea rows={3} className="mono" />
                 </Form.Item>
                 <Row gutter={16}>

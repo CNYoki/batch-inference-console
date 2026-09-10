@@ -125,6 +125,8 @@ class ModelConfigBase(BaseModel):
     supports_tools: bool = False
     reasoning_mode: Literal["off", "optional", "forced"] = "off"
     reasoning_payload: dict[str, Any] = Field(default_factory=dict)
+    # 没开推理时附加的片段，例 {"chat_template_kwargs": {"enable_thinking": false}}
+    reasoning_off_payload: dict[str, Any] = Field(default_factory=dict)
     reasoning_effort_options: list[str] = Field(default_factory=list, max_length=16)
     reasoning_default_effort: str = Field(default="", max_length=32)
 
@@ -174,6 +176,7 @@ class ModelConfigUpdate(BaseModel):
     supports_tools: bool | None = None
     reasoning_mode: Literal["off", "optional", "forced"] | None = None
     reasoning_payload: dict[str, Any] | None = None
+    reasoning_off_payload: dict[str, Any] | None = None
     reasoning_effort_options: list[str] | None = Field(default=None, max_length=16)
     reasoning_default_effort: str | None = Field(default=None, max_length=32)
 
@@ -206,6 +209,9 @@ class GatewayReasoningRule(BaseModel):
     # 关掉表示这些模型不支持推理，新建任务页连开关都不显示
     enabled: bool = True
     payload: dict[str, Any] = Field(default_factory=dict)
+    # 没开推理时附加的片段（用户没打开开关，或 enabled 关掉表示不支持推理时）。
+    # 只对命中这条规则的模型生效；没配规则的模型走网关默认配置，不带关闭片段
+    off_payload: dict[str, Any] = Field(default_factory=dict)
     effort_options: list[str] = Field(default_factory=list, max_length=16)
     default_effort: str = Field(default="", max_length=32)
 
@@ -437,6 +443,17 @@ class JobDryRunOut(BaseModel):
     usage: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
     response: dict[str, Any] | None = None
+
+
+class PauseAllOut(BaseModel):
+    """一键暂停全站任务的结果。"""
+
+    # 已直接落成暂停的：排队中的，以及 worker 已经没了心跳的
+    paused: int
+    # 已发暂停信号、等 worker 几秒内自行收尾的
+    signaled: int
+    # 处理出错（多为 Redis 抖动）没能暂停的，可以再点一次
+    failed: int = 0
 
 
 class JobPatch(BaseModel):

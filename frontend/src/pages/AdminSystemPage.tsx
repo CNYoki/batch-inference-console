@@ -4,7 +4,7 @@ import {
   Progress, Row, Select, Space, Statistic, Switch, Table, Tag, Tooltip, Typography,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { ReloadOutlined } from '@ant-design/icons'
+import { PauseCircleOutlined, ReloadOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import type {
   Dashboard, MailTestResult, ModelJobLimit, MyUsage, RetentionPreview, SystemSettings, WorkerInfo,
@@ -25,6 +25,7 @@ type RuleForm = {
   pattern: string
   enabled?: boolean
   payload?: string
+  off_payload?: string
   effort_options?: string[]
   default_effort?: string
   preset?: string
@@ -49,6 +50,7 @@ export default function AdminSystemPage() {
   const [mailTesting, setMailTesting] = useState(false)
   const [mailResult, setMailResult] = useState<MailTestResult | null>(null)
   const [purging, setPurging] = useState(false)
+  const [pausingAll, setPausingAll] = useState(false)
 
   const load = useCallback(async () => {
     const [d, u] = await Promise.all([
@@ -75,6 +77,7 @@ export default function AdminSystemPage() {
         user_gateway_reasoning_rules: (s.user_gateway_reasoning_rules ?? []).map((r) => ({
           ...r,
           payload: JSON.stringify(r.payload ?? {}, null, 2),
+          off_payload: JSON.stringify(r.off_payload ?? {}, null, 2),
           preset: matchPreset(r.payload, r.effort_options),
         })),
       })
@@ -94,6 +97,7 @@ export default function AdminSystemPage() {
     next[index] = {
       ...next[index],
       payload: JSON.stringify(preset.payload, null, 2),
+      off_payload: JSON.stringify(preset.offPayload, null, 2),
       effort_options: [...preset.effortOptions],
       default_effort: preset.defaultEffort,
     }
@@ -147,6 +151,7 @@ export default function AdminSystemPage() {
             pattern: r.pattern.trim(),
             enabled: r.enabled !== false,
             payload: parseJson(r.payload),
+            off_payload: parseJson(r.off_payload),
             effort_options: r.effort_options ?? [],
             default_effort: r.default_effort ?? '',
           })),
@@ -185,6 +190,7 @@ export default function AdminSystemPage() {
         user_gateway_reasoning_rules: (s.user_gateway_reasoning_rules ?? []).map((r) => ({
           ...r,
           payload: JSON.stringify(r.payload ?? {}, null, 2),
+          off_payload: JSON.stringify(r.off_payload ?? {}, null, 2),
           preset: matchPreset(r.payload, r.effort_options),
         })),
       })
@@ -197,6 +203,47 @@ export default function AdminSystemPage() {
     } finally {
       setSaving(false)
     }
+  }
+
+  /** 一键暂停全站排队中与运行中的任务，例如重建镜像前 */
+  const pauseAll = () => {
+    const running = dash?.jobs_by_status?.running ?? 0
+    const queued = dash?.jobs_by_status?.queued ?? 0
+    if (!running && !queued) {
+      message.info('当前没有排队中或运行中的任务')
+      return
+    }
+    modal.confirm({
+      title: '暂停所有任务？',
+      content: (
+        <>
+          将暂停全站 {formatNumber(running)} 个运行中、{formatNumber(queued)} 个排队中的任务（所有用户）。
+          运行中的任务会在几秒内停下，已完成的条目不会丢，之后在任务列表里恢复即可接着跑。
+          <br />
+          之后新提交的任务不受影响；要一并拦住，请在下方「全局设置」里关闭「允许提交新任务」。
+        </>
+      ),
+      okText: '全部暂停', okButtonProps: { danger: true }, cancelText: '取消',
+      onOk: async () => {
+        setPausingAll(true)
+        try {
+          const r = await api.pauseAllJobs()
+          const parts = [`已暂停 ${r.paused} 个`]
+          if (r.signaled) parts.push(`${r.signaled} 个正在收尾，几秒后变为已暂停`)
+          if (r.failed) {
+            parts.push(`${r.failed} 个失败，可以再点一次`)
+            message.warning(parts.join('，'))
+          } else {
+            message.success(parts.join('，'))
+          }
+          await load()
+        } catch {
+          // 拦截器已提示
+        } finally {
+          setPausingAll(false)
+        }
+      },
+    })
   }
 
   const workerColumns: ColumnsType<WorkerInfo> = [
@@ -306,7 +353,15 @@ export default function AdminSystemPage() {
       <Row gutter={16}>
         <Col xs={24} lg={14}>
           <Card title="Worker 状态"
-            extra={<Button size="small" icon={<ReloadOutlined />} onClick={() => void load()}>刷新</Button>}>
+            extra={
+              <Space>
+                <Button size="small" danger icon={<PauseCircleOutlined />} loading={pausingAll}
+                  onClick={pauseAll}>
+                  暂停所有任务
+                </Button>
+                <Button size="small" icon={<ReloadOutlined />} onClick={() => void load()}>刷新</Button>
+              </Space>
+            }>
             <Table rowKey="id" size="small" columns={workerColumns} dataSource={dash?.workers ?? []}
               pagination={false}
               locale={{ emptyText: '没有在线的 worker —— 请确认已启动 python -m app.worker.main' }} />
@@ -410,7 +465,7 @@ export default function AdminSystemPage() {
                       </Form.Item>
                       <Form.Item {...rest} name={[name, 'enabled']} label="支持推理"
                         valuePropName="checked"
-                        extra="关掉表示这些模型不支持，用户看不到开关">
+                        extra="关掉表示这些模型不支持，用户看不到开关；关闭时的参数照样会附加">
                         <Switch />
                       </Form.Item>
                       <Form.Item {...rest} name={[name, 'preset']} label="请求体写法">
@@ -426,6 +481,11 @@ export default function AdminSystemPage() {
                         <Input.TextArea rows={3} className="mono" style={{ width: 380 }}
                           placeholder="{}" />
                       </Form.Item>
+                      <Form.Item {...rest} name={[name, 'off_payload']} label="关闭推理时附加的请求参数"
+                        extra="用户没打开推理时带上，只对这条规则命中的模型生效；没配规则的模型不带">
+                        <Input.TextArea rows={3} className="mono" style={{ width: 380 }}
+                          placeholder="{}" />
+                      </Form.Item>
                       <Form.Item {...rest} name={[name, 'effort_options']} label="用户可选的推理档位">
                         <Select mode="tags" options={EFFORT_LEVEL_OPTIONS}
                           placeholder="low, medium, high" style={{ width: 240 }} />
@@ -438,7 +498,7 @@ export default function AdminSystemPage() {
                     </Space>
                   </div>
                 ))}
-                <Button type="dashed" onClick={() => add({ enabled: true, payload: '{}' })}
+                <Button type="dashed" onClick={() => add({ enabled: true, payload: '{}', off_payload: '{}' })}
                   style={{ marginBottom: 16 }}>
                   + 添加模型规则
                 </Button>

@@ -419,6 +419,24 @@ async def test_personal_reasoning_caps_follow_model_name_rules(
 
 
 @pytest.mark.asyncio
+async def test_reasoning_rule_off_payload_roundtrip(admin_client: AsyncClient):
+    """规则里的关闭推理参数要能存能读；不填的规则回来是空对象。"""
+    off = {"chat_template_kwargs": {"enable_thinking": False}}
+    resp = await admin_client.patch("/api/admin/settings", json={
+        "user_gateway_reasoning_rules": [
+            {"pattern": "qwen3-*", "off_payload": off},
+            {"pattern": "gpt-oss-*"},
+        ],
+    })
+    assert resp.status_code == 200, resp.text
+    rules = resp.json()["user_gateway_reasoning_rules"]
+    assert rules[0]["off_payload"] == off
+    assert rules[1]["off_payload"] == {}
+
+    await admin_client.patch("/api/admin/settings", json={"user_gateway_reasoning_rules": []})
+
+
+@pytest.mark.asyncio
 async def test_model_options_reports_gateway_failure_without_500(
     admin_client: AsyncClient, monkeypatch
 ):
@@ -1204,6 +1222,49 @@ async def test_pause_and_cancel_settle_jobs_whose_worker_is_gone(
     created.append(flaky)
     out = (await admin_client.post(f"/api/jobs/{flaky}/cancel")).json()
     assert out["status"] == "running"
+
+    async with session_scope() as db:
+        for jid in created:
+            await db.delete(await db.get(Job, jid))
+
+
+@pytest.mark.asyncio
+async def test_admin_pause_all_jobs(admin_client: AsyncClient, monkeypatch):
+    """一键暂停：排队中和 worker 已没的直接落暂停，正在跑的发信号等 worker 收尾。"""
+    import time
+
+    import app.api.jobs as jobs_mod
+    from app.db import session_scope
+    from app.models import Job, JobStatus
+
+    fake = _FakeControlQueue({"alive": time.time() - 5})
+    monkeypatch.setattr(jobs_mod, "queue", fake)
+
+    alive = await _running_job("alive")
+    gone = await _running_job("killed-worker")
+    queued = await _running_job(None)
+    async with session_scope() as db:
+        (await db.get(Job, queued)).status = JobStatus.queued
+    created = [alive, gone, queued]
+
+    out = (await admin_client.post("/api/jobs/pause-all")).json()
+    assert out["paused"] >= 2 and out["signaled"] >= 1 and out["failed"] == 0
+
+    async with session_scope() as db:
+        statuses = {jid: (await db.get(Job, jid)).status for jid in created}
+    assert statuses[gone] == JobStatus.paused
+    assert statuses[queued] == JobStatus.paused
+    # 正在跑的交给 worker 自己收尾
+    assert statuses[alive] == JobStatus.running and fake.signals[alive] == "pause"
+
+    # 普通用户不能用
+    await admin_client.post("/api/admin/users", json={
+        "username": "pauseuser", "password": "UserPass123!", "role": "user",
+    })
+    async with AsyncClient(transport=admin_client._transport, base_url="http://test") as user_client:
+        await user_client.post("/api/auth/login",
+                               json={"username": "pauseuser", "password": "UserPass123!"})
+        assert (await user_client.post("/api/jobs/pause-all")).status_code == 403
 
     async with session_scope() as db:
         for jid in created:

@@ -204,6 +204,9 @@ class ModelConfig(Base, TimestampMixin):
     # 开启推理时附加的请求体片段，例 {"reasoning_effort": "$effort"}；
     # 片段里任意位置的 "$effort" 会被换成用户选的档位
     reasoning_payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    # 没开推理时附加的请求体片段（模型不支持推理，或可选但用户没打开；强制开启时不附加）。
+    # Qwen3 这类默认就会思考的模型，得明确带上 enable_thinking: false 才真的关掉
+    reasoning_off_payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     # 允许用户挑选的推理档位，例 ["low", "medium", "high"]。
     # 留空表示不让用户选，payload 原样发出
     reasoning_effort_options: Mapped[list] = mapped_column(JSON, default=list, nullable=False)

@@ -118,6 +118,15 @@ def resolve_reasoning_payload(mc: ModelConfig, effort: str | None = None) -> dic
     return _fill_effort(payload, effort)
 
 
+def _merge_payload(params: dict[str, Any], payload: dict[str, Any]) -> None:
+    """把推理片段合进参数；chat_template_kwargs 这类嵌套字段跟已有值合并，别整个盖掉。"""
+    for key, value in payload.items():
+        if isinstance(value, dict) and isinstance(params.get(key), dict):
+            params[key] = {**params[key], **value}
+        else:
+            params[key] = value
+
+
 def resolve_params(mc: ModelConfig, user_params: dict[str, Any] | None) -> dict[str, Any]:
     """合并：模型默认值 → 用户覆盖（受白名单约束）→ 强制值。"""
     params: dict[str, Any] = dict(mc.default_params or {})
@@ -145,14 +154,12 @@ def resolve_params(mc: ModelConfig, user_params: dict[str, Any] | None) -> dict[
             if key in params and isinstance(params[key], int):
                 params[key] = min(params[key], mc.max_tokens_cap)
 
-    # 推理开关
+    # 推理开关：开了附加开启片段；没开（模型不支持，或可选但用户没打开）附加关闭片段 ——
+    # Qwen3 这类默认就会思考的模型，不明确发 enable_thinking: false 是关不掉的
     if mc.reasoning_mode == "forced" or (mc.reasoning_mode == "optional" and reasoning):
-        for key, value in resolve_reasoning_payload(mc, effort).items():
-            # chat_template_kwargs 这类嵌套字段跟已有值合并，别整个盖掉
-            if isinstance(value, dict) and isinstance(params.get(key), dict):
-                params[key] = {**params[key], **value}
-            else:
-                params[key] = value
+        _merge_payload(params, resolve_reasoning_payload(mc, effort))
+    else:
+        _merge_payload(params, dict(mc.reasoning_off_payload or {}))
 
     return params
 

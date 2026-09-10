@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from ..config import settings
-from ..core.deps import DB, CurrentUser
+from ..core.deps import DB, CurrentAdmin, CurrentUser
 from ..core.security import decrypt_secret, encrypt_secret
 from ..models import (
     DOWNLOADABLE_STATUSES,
@@ -42,6 +42,7 @@ from ..schemas import (
     JobParams,
     JobPatch,
     ModelSelection,
+    PauseAllOut,
     UploadValidateOut,
 )
 from ..services import jsonl as jsonl_svc
@@ -637,11 +638,11 @@ async def cancel_job(job_id: str, user: CurrentUser, db: DB) -> JobOut:
     return _to_out(job)
 
 
-@router.post("/{job_id}/pause", response_model=JobOut)
-async def pause_job(job_id: str, user: CurrentUser, db: DB) -> JobOut:
-    job = await _get_job_or_404(db, user, job_id)
-    if job.status not in {JobStatus.running, JobStatus.queued}:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "只有排队中或运行中的任务可以暂停")
+async def _pause(job: Job, db: DB) -> bool:
+    """暂停一个排队中/运行中的任务。
+
+    返回 True 表示已直接落成暂停；False 表示发了信号、要等 worker 自己收尾。
+    """
     orphaned = job.status == JobStatus.running and await _worker_gone(job.worker_id)
 
     await queue.signal(job.id, "pause")
@@ -649,10 +650,48 @@ async def pause_job(job_id: str, user: CurrentUser, db: DB) -> JobOut:
     if orphaned:
         await _settle_orphan(job, JobStatus.paused)
         await db.commit()
-    elif job.status == JobStatus.queued:
+        return True
+    if job.status == JobStatus.queued:
         job.status = JobStatus.paused
         await db.commit()
         await queue.clear_signal(job.id)
+        return True
+    return False
+
+
+@router.post("/pause-all", response_model=PauseAllOut)
+async def pause_all_jobs(_: CurrentAdmin, db: DB) -> PauseAllOut:
+    """管理员一键暂停全站排队中和运行中的任务，例如重建镜像前。
+
+    每个任务的处理与单个暂停完全一样；之后在任务列表里恢复即可断点续跑。
+    """
+    jobs = (
+        await db.execute(
+            select(Job).where(Job.status.in_([JobStatus.queued, JobStatus.running]))
+        )
+    ).scalars().all()
+
+    paused = signaled = failed = 0
+    for job in jobs:
+        try:
+            if await _pause(job, db):
+                paused += 1
+            else:
+                signaled += 1
+        except Exception:
+            # 一个失败不该挡住其余任务
+            log.exception("暂停任务 %s 失败", job.id)
+            await db.rollback()
+            failed += 1
+    return PauseAllOut(paused=paused, signaled=signaled, failed=failed)
+
+
+@router.post("/{job_id}/pause", response_model=JobOut)
+async def pause_job(job_id: str, user: CurrentUser, db: DB) -> JobOut:
+    job = await _get_job_or_404(db, user, job_id)
+    if job.status not in {JobStatus.running, JobStatus.queued}:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "只有排队中或运行中的任务可以暂停")
+    await _pause(job, db)
 
     await db.refresh(job, ["user", "model_config"])
     return _to_out(job)

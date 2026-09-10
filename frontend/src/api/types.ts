@@ -56,6 +56,8 @@ export interface ModelConfig extends ModelOption {
   forced_params: Record<string, unknown>
   supports_tools: boolean
   reasoning_payload: Record<string, unknown>
+  /** 没开推理时附加的请求体片段；强制开启的模型不附加 */
+  reasoning_off_payload: Record<string, unknown>
   rpm_limit: number
   tpm_limit: number
   request_timeout: number
@@ -97,6 +99,8 @@ export interface GatewayReasoningRule {
   pattern: string
   enabled: boolean
   payload: Record<string, unknown>
+  /** 没开推理时附加的请求体片段 */
+  off_payload: Record<string, unknown>
   effort_options: string[]
   default_effort: string
 }
