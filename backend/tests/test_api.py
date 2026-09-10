@@ -713,6 +713,103 @@ async def test_split_script_requires_login(client: AsyncClient):
 
 
 # --------------------------------------------------------------------------- #
+# 我的 Prompt
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_prompt_crud(admin_client: AsyncClient):
+    payload = {
+        "name": "  新闻摘要  ", "description": "按段落总结",
+        "system_prompt": "你是编辑", "prompt_template": "总结：{{title}}\n{{body}}",
+        "variables": [{"name": "title", "field": "t"}, {"name": "body", "field": "content"}],
+    }
+    resp = await admin_client.post("/api/prompts", json=payload)
+    assert resp.status_code == 201, resp.text
+    created = resp.json()
+    assert created["name"] == "新闻摘要"          # 首尾空格去掉，免得出现"看起来同名"的两条
+    assert created["variables"][1] == {"name": "body", "field": "content"}
+
+    # 同名 409，不是 500
+    assert (await admin_client.post("/api/prompts", json=payload)).status_code == 409
+
+    listed = (await admin_client.get("/api/prompts")).json()
+    assert created["id"] in {p["id"] for p in listed}
+
+    updated = (await admin_client.patch(f"/api/prompts/{created['id']}", json={
+        "prompt_template": "只看标题：{{title}}",
+        "variables": [{"name": "title", "field": "t"}],
+        "system_prompt": None,
+    })).json()
+    assert updated["prompt_template"] == "只看标题：{{title}}"
+    assert updated["variables"] == [{"name": "title", "field": "t"}]
+    assert updated["system_prompt"] is None
+    assert updated["description"] == "按段落总结"   # 没传的字段保持不变
+
+    # 必填字段传 null 当作不修改，不能把库里的非空列写成空
+    same = (await admin_client.patch(f"/api/prompts/{created['id']}", json={"name": None})).json()
+    assert same["name"] == "新闻摘要"
+
+    assert (await admin_client.delete(f"/api/prompts/{created['id']}")).status_code == 204
+    assert (await admin_client.get(f"/api/prompts/{created['id']}")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_prompt_rename_to_existing_name_conflicts(admin_client: AsyncClient):
+    base = {"prompt_template": "{{x}}", "variables": [{"name": "x", "field": "x"}]}
+    a = (await admin_client.post("/api/prompts", json={"name": "改名A", **base})).json()
+    await admin_client.post("/api/prompts", json={"name": "改名B", **base})
+    resp = await admin_client.patch(f"/api/prompts/{a['id']}", json={"name": "改名B"})
+    assert resp.status_code == 409
+    # 回滚后原记录不受影响
+    assert (await admin_client.get(f"/api/prompts/{a['id']}")).json()["name"] == "改名A"
+
+
+@pytest.mark.asyncio
+async def test_prompt_rejects_bad_variables(admin_client: AsyncClient):
+    for variables in (
+        [{"name": "x", "field": "a"}, {"name": "x", "field": "b"}],   # 变量名重复
+        [{"name": "1bad", "field": "a"}],                              # 变量名不合法
+    ):
+        resp = await admin_client.post("/api/prompts", json={
+            "name": "坏变量", "prompt_template": "{{x}}", "variables": variables,
+        })
+        assert resp.status_code == 422, variables
+    assert (await admin_client.post("/api/prompts", json={
+        "name": "   ", "prompt_template": "t",
+    })).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_prompts_are_private_to_owner(admin_client: AsyncClient):
+    mine = (await admin_client.post("/api/prompts", json={
+        "name": "管理员私有", "prompt_template": "t",
+    })).json()
+    await admin_client.post("/api/admin/users", json={
+        "username": "promptuser", "password": "UserPass123!", "role": "user",
+    })
+
+    async with AsyncClient(transport=admin_client._transport, base_url="http://test") as other:
+        await other.post("/api/auth/login", json={"username": "promptuser", "password": "UserPass123!"})
+        assert mine["id"] not in {p["id"] for p in (await other.get("/api/prompts")).json()}
+        # 别人的 Prompt 读、改、删一律 404，不暴露存在与否
+        url = f"/api/prompts/{mine['id']}"
+        assert (await other.get(url)).status_code == 404
+        assert (await other.patch(url, json={"name": "抢过来"})).status_code == 404
+        assert (await other.delete(url)).status_code == 404
+
+        # 不同用户之间可以重名
+        assert (await other.post("/api/prompts", json={
+            "name": "管理员私有", "prompt_template": "t",
+        })).status_code == 201
+
+    assert (await admin_client.get(f"/api/prompts/{mine['id']}")).json()["name"] == "管理员私有"
+
+
+@pytest.mark.asyncio
+async def test_prompts_require_login(client: AsyncClient):
+    assert (await client.get("/api/prompts")).status_code == 401
+
+
+# --------------------------------------------------------------------------- #
 # 提交前试跑一条
 # --------------------------------------------------------------------------- #
 def _fake_inference(monkeypatch, result: dict) -> dict:

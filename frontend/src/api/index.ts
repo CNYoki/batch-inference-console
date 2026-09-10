@@ -2,7 +2,7 @@ import { http } from './client'
 import type {
   AuthInfo, Dashboard, DryRunResult, Job, JobErrorRow, JobList, MailTestResult, ModelConfig,
   ModelOption, ModelOptions, MyUsage, PersonalModels, ResultPage, RetentionPreview,
-  ScriptConfig, ScriptPreview, SystemSettings, UploadResult, User,
+  SavedPrompt, SavedPromptInput, ScriptConfig, ScriptPreview, SystemSettings, UploadResult, User,
 } from './types'
 
 export * from './types'
@@ -119,6 +119,15 @@ export const api = {
   // ---------------- 代码生成 ----------------
   splitScript: (config: ScriptConfig) =>
     http.post<ScriptPreview>('/tools/split-script', config).then((r) => r.data),
+
+  // ---------------- 我的 Prompt ----------------
+  prompts: () => http.get<SavedPrompt[]>('/prompts').then((r) => r.data),
+  createPrompt: (payload: SavedPromptInput) =>
+    http.post<SavedPrompt>('/prompts', payload).then((r) => r.data),
+  updatePrompt: (id: string, payload: Partial<SavedPromptInput>) =>
+    http.patch<SavedPrompt>(`/prompts/${id}`, payload).then((r) => r.data),
+  deletePrompt: (id: string) => http.delete(`/prompts/${id}`),
+
   userUsage: () =>
     http.get<Array<{
       user_id: string; username: string; job_count: number; items: number

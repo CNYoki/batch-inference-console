@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { Alert, Avatar, Dropdown, Layout, Menu, Tag, Typography } from 'antd'
 import {
-  ApiOutlined, CodeOutlined, ControlOutlined, DatabaseOutlined, LogoutOutlined,
-  PlusOutlined, SettingOutlined, TeamOutlined, UserOutlined,
+  ApiOutlined, CodeOutlined, ControlOutlined, DatabaseOutlined, FileTextOutlined, LogoutOutlined,
+  MessageOutlined, PlusOutlined, SettingOutlined, TeamOutlined, UserOutlined,
 } from '@ant-design/icons'
 import { api } from '../api'
 import { useAuth } from '../hooks/useAuth'
@@ -32,7 +32,13 @@ export default function MainLayout() {
     const base = [
       { key: '/jobs', icon: <DatabaseOutlined />, label: '任务列表' },
       { key: '/jobs/new', icon: <PlusOutlined />, label: '新建任务' },
-      { key: '/tools/split-script', icon: <CodeOutlined />, label: '数据预处理脚本' },
+      {
+        key: '/tools', icon: <CodeOutlined />, label: '数据预处理',
+        children: [
+          { key: '/tools/split-script', icon: <FileTextOutlined />, label: '脚本生成' },
+          { key: '/tools/prompts', icon: <MessageOutlined />, label: '我的 Prompt' },
+        ],
+      },
     ]
     if (!isAdmin) return base
     return [
@@ -63,6 +69,8 @@ export default function MainLayout() {
               theme="dark"
               mode="inline"
               selectedKeys={[selectedKey]}
+              // 子菜单默认展开，数据预处理下的两个入口一眼就能看到
+              defaultOpenKeys={['/tools']}
               items={items}
               onClick={({ key }) => navigate(key)}
             />
