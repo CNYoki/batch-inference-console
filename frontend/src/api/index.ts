@@ -94,6 +94,12 @@ export const api = {
   cancelJob: (id: string) => http.post<Job>(`/jobs/${id}/cancel`).then((r) => r.data),
   pauseJob: (id: string) => http.post<Job>(`/jobs/${id}/pause`).then((r) => r.data),
   resumeJob: (id: string) => http.post<Job>(`/jobs/${id}/resume`).then((r) => r.data),
+  // 暂停/取消/失败的任务换模型；推理参数沿用原任务，按新模型重新合并
+  changeJobModel: (id: string, payload: {
+    model_source: 'shared' | 'personal'
+    model_config_id?: string | null
+    personal_model?: string | null
+  }) => http.post<Job>(`/jobs/${id}/model`, payload).then((r) => r.data),
   retryFailed: (id: string) => http.post<Job>(`/jobs/${id}/retry-failed`).then((r) => r.data),
   deleteJob: (id: string) => http.delete(`/jobs/${id}`),
 

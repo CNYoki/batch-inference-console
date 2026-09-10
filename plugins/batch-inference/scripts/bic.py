@@ -874,6 +874,19 @@ def cmd_control(args) -> int:
     return 0
 
 
+def cmd_set_model(args) -> int:
+    client = get_client()
+    selection, label = _resolve_model(client, args.model, args.personal)
+    jobs = []
+    for j in _job_ids(args):
+        job = client.call("POST", f"/jobs/{j}/model", json_body=selection)
+        if args.resume:
+            job = client.call("POST", f"/jobs/{j}/resume")
+        jobs.append(_brief(job))
+    emit({"model": label, "resumed": args.resume, "jobs": jobs})
+    return 0
+
+
 def cmd_download(args) -> int:
     client = get_client()
     out_dir = Path(args.output_dir).expanduser()
@@ -1120,6 +1133,13 @@ def build_parser() -> argparse.ArgumentParser:
         p = sub.add_parser(name, help=text)
         _add_job_ids(p)
         p.set_defaults(func=cmd_control)
+
+    p = sub.add_parser("set-model", help="给已暂停/取消/失败的任务换模型，剩余条目改用新模型")
+    _add_job_ids(p)
+    p.add_argument("--model", required=True, help="模型的 name / display_name / id，或个人网关模型名")
+    p.add_argument("--personal", action="store_true", help="只在个人网关模型里找")
+    p.add_argument("--resume", action="store_true", help="换完立即恢复（会继续消耗额度）")
+    p.set_defaults(func=cmd_set_model)
 
     p = sub.add_parser("download", help="下载结果（任务结束后）")
     _add_job_ids(p)

@@ -13,6 +13,7 @@ import type {
 } from '../api'
 import { formatBytes, formatNumber } from '../utils'
 import { defaultEffort, sortEfforts } from '../reasoning'
+import { buildModelGroups, filterModelOption, parseSelection } from '../modelSelect'
 
 const SAMPLE = `{"custom_id": "req-1", "body": {"messages": [{"role": "user", "content": "把这句话翻译成英文：珞珈山下，清风徐来。"}]}}
 {"custom_id": "req-2", "messages": [{"role": "user", "content": "总结这段文字……"}]}
@@ -32,18 +33,6 @@ type DryState = {
 function errorDetail(err: unknown): string | undefined {
   const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
   return typeof detail === 'string' ? detail : undefined
-}
-
-/** 下拉框的值把来源编进去：shared:<配置id> / personal:<模型名> */
-type Selection = { source: 'shared' | 'personal'; key: string }
-
-function parseSelection(value?: string): Selection | null {
-  if (!value) return null
-  const idx = value.indexOf(':')
-  if (idx < 0) return null
-  const source = value.slice(0, idx)
-  if (source !== 'shared' && source !== 'personal') return null
-  return { source, key: value.slice(idx + 1) }
 }
 
 /**
@@ -281,37 +270,7 @@ export default function NewJobPage() {
     }
   }
 
-  const modelGroups = useMemo(() => {
-    if (!options) return []
-    const groups: Array<{ label: string; options: Array<{ value: string; label: JSX.Element; name: string }> }> = []
-
-    if (options.shared.length) {
-      groups.push({
-        label: '公用模型',
-        options: options.shared.map((m) => ({
-          value: `shared:${m.id}`,
-          name: `${m.display_name} ${m.name}`,
-          label: (
-            <Space size={6}>
-              <Tag color="blue" style={{ marginInlineEnd: 0 }}>公用</Tag>
-              <span>{m.display_name}</span>
-            </Space>
-          ),
-        })),
-      })
-    }
-    if (options.personal.length) {
-      groups.push({
-        label: `我的模型 · ${options.gateway_label}`,
-        options: options.personal.map((n) => ({
-          value: `personal:${n}`,
-          name: n,
-          label: <span className="mono">{n}</span>,
-        })),
-      })
-    }
-    return groups
-  }, [options])
+  const modelGroups = useMemo(() => buildModelGroups(options), [options])
 
   const step = !upload || upload.errors.length ? 0 : selection ? 2 : 1
 
@@ -487,10 +446,7 @@ export default function NewJobPage() {
                   }
                   options={modelGroups}
                   optionFilterProp="name"
-                  filterOption={(input, option) =>
-                    String((option as { name?: string })?.name ?? '')
-                      .toLowerCase().includes(input.toLowerCase())
-                  }
+                  filterOption={filterModelOption}
                 />
               </Form.Item>
 

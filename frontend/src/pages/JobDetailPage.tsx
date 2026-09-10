@@ -7,10 +7,11 @@ import {
 import type { ColumnsType } from 'antd/es/table'
 import {
   ArrowLeftOutlined, DeleteOutlined, DownloadOutlined, PauseCircleOutlined,
-  PlayCircleOutlined, ReloadOutlined, StopOutlined,
+  PlayCircleOutlined, ReloadOutlined, StopOutlined, SwapOutlined,
 } from '@ant-design/icons'
 import { api, downloadUrl } from '../api'
 import type { Job, JobErrorRow, ResultRow } from '../api'
+import ChangeModelModal from '../components/ChangeModelModal'
 import JobStatusTag from '../components/JobStatusTag'
 import { usePolling } from '../hooks/usePolling'
 import { ACTIVE_STATUSES, formatBytes, formatDateTime, formatDuration, formatNumber } from '../utils'
@@ -27,6 +28,7 @@ export default function JobDetailPage() {
   const [resultPage, setResultPage] = useState(1)
   const [errors, setErrors] = useState<JobErrorRow[]>([])
   const [tab, setTab] = useState('results')
+  const [changingModel, setChangingModel] = useState(false)
 
   const loadJob = useCallback(async () => {
     try {
@@ -142,6 +144,9 @@ export default function JobDetailPage() {
               {['paused', 'failed', 'canceled'].includes(job.status) && !purged && (
                 <Button icon={<PlayCircleOutlined />}
                   onClick={() => void act(() => api.resumeJob(job.id), '已重新入队')}>恢复</Button>
+              )}
+              {['paused', 'failed', 'canceled'].includes(job.status) && !purged && (
+                <Button icon={<SwapOutlined />} onClick={() => setChangingModel(true)}>更换模型</Button>
               )}
               {finished && job.failed_items > 0 && !purged && (
                 <Button icon={<ReloadOutlined />}
@@ -278,6 +283,13 @@ export default function JobDetailPage() {
           ]}
         />
       </Card>
+
+      <ChangeModelModal
+        job={job}
+        open={changingModel}
+        onClose={() => setChangingModel(false)}
+        onChanged={() => void loadJob()}
+      />
     </Space>
   )
 }

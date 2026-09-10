@@ -24,6 +24,8 @@ Browser ──► API (FastAPI) ──► MySQL / PostgreSQL   (metadata, state)
 - Priority queue with leases — a crashed worker's job is automatically requeued
 - Pause / resume / cancel, and **item-level checkpointing**: resuming a job re-sends only the
   requests that never completed
+- **Switch models mid-job**: a paused, canceled or failed job can be moved to another model;
+  resuming sends only the remaining items to the new one
 - Retry just the failed items without re-running the successful ones
 - **Dry run on submit**: the first line is sent for real before the job is queued, so a wrong
   model name, an expired key or a reasoning field the gateway rejects surfaces in seconds

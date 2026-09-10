@@ -940,3 +940,101 @@ async def test_dry_run_does_not_create_a_job(admin_client: AsyncClient, monkeypa
         "upload_id": upload_id, "model_config_id": model_id,
     })
     assert again.status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# 停下来的任务换模型
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_change_model_only_on_stopped_jobs_and_reresolves_params(
+    admin_client: AsyncClient, monkeypatch
+):
+    from sqlalchemy import select
+
+    from app.db import session_scope
+    from app.models import Job, JobStatus, User
+
+    old = (await admin_client.post("/api/admin/models", json={
+        "name": "swap-old", "display_name": "旧模型", "base_url": "http://x/v1",
+        "model_name": "old-m", "max_concurrency": 16,
+    })).json()
+    new = (await admin_client.post("/api/admin/models", json={
+        "name": "swap-new", "display_name": "新模型", "base_url": "http://x/v1",
+        "model_name": "new-m", "max_concurrency": 4, "forced_params": {"temperature": 0},
+        "reasoning_mode": "optional", "reasoning_payload": {"reasoning_effort": "$effort"},
+        "reasoning_effort_options": ["low", "high"], "reasoning_default_effort": "low",
+    })).json()
+
+    async with session_scope() as db:
+        admin = (await db.execute(select(User).where(User.username == "admin"))).scalar_one()
+        job = Job(
+            name="换模型", user_id=admin.id, model_config_id=old["id"], status=JobStatus.running,
+            params={"temperature": 0.7, "max_tokens": 256, "reasoning": True, "reasoning_effort": "high"},
+            resolved_params={"temperature": 0.7, "max_tokens": 256}, concurrency=12,
+            input_filename="a.jsonl", input_path="/tmp/none.jsonl",
+            input_size=1, total_items=10, completed_items=3,
+        )
+        db.add(job)
+        await db.flush()
+        job_id = job.id
+
+    url = f"/api/jobs/{job_id}/model"
+    # 运行中的 worker 握着旧配置，这时换了也不生效
+    for blocked in (JobStatus.running, JobStatus.queued, JobStatus.succeeded):
+        async with session_scope() as db:
+            (await db.get(Job, job_id)).status = blocked
+        resp = await admin_client.post(url, json={"model_config_id": new["id"]})
+        assert resp.status_code == 400, blocked.value
+
+    for allowed in (JobStatus.paused, JobStatus.canceled, JobStatus.failed):
+        async with session_scope() as db:
+            (await db.get(Job, job_id)).status = allowed
+        resp = await admin_client.post(url, json={"model_config_id": new["id"]})
+        assert resp.status_code == 200, resp.text
+        out = resp.json()
+        assert out["status"] == allowed.value          # 只换模型，不自动入队
+        assert out["model_config_id"] == new["id"]
+        assert out["model_display_name"] == "新模型"
+        assert out["concurrency"] == 4                 # 按新模型的上限重新截
+        assert out["completed_items"] == 3             # 进度原样保留
+
+    async with session_scope() as db:
+        resolved = (await db.get(Job, job_id)).resolved_params
+    assert resolved["temperature"] == 0                # 新模型的强制值生效
+    assert resolved["max_tokens"] == 256               # 原任务的参数沿用
+    assert resolved["reasoning_effort"] == "high"      # 推理档位按新模型重新拼
+
+    # 不存在的模型
+    bad = await admin_client.post(url, json={"model_config_id": "0" * 32})
+    assert bad.status_code == 400 and "模型不可用" in bad.json()["detail"]
+
+    # 别人的任务不能换成自己网关里的模型：执行时用的是提交者本人的 token
+    await _enable_gateway(admin_client)
+    _fake_gateway(monkeypatch)
+    await admin_client.post("/api/admin/users", json={
+        "username": "swapuser", "password": "UserPass123!", "role": "user",
+    })
+    async with session_scope() as db:
+        other = (await db.execute(select(User).where(User.username == "swapuser"))).scalar_one()
+        (await db.get(Job, job_id)).user_id = other.id
+    resp = await admin_client.post(url, json={
+        "model_source": "personal", "personal_model": "gw-model-a", "personal_token": "sk-x",
+        "remember_token": False,
+    })
+    assert resp.status_code == 400 and "提交者本人" in resp.json()["detail"]
+
+    # 自己的任务可以换成个人网关模型
+    async with session_scope() as db:
+        (await db.get(Job, job_id)).user_id = admin.id
+    resp = await admin_client.post(url, json={
+        "model_source": "personal", "personal_model": "gw-model-a", "personal_token": "sk-x",
+        "remember_token": False,
+    })
+    assert resp.status_code == 200, resp.text
+    out = resp.json()
+    assert out["model_source"] == "personal"
+    assert out["model_config_id"] is None
+    assert out["model_display_name"] == "gw-model-a"
+
+    async with session_scope() as db:
+        await db.delete(await db.get(Job, job_id))
