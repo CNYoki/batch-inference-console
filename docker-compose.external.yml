@@ -23,8 +23,9 @@ services:
       # :? 表示未设置就直接报错退出，避免悄悄连到不存在的默认地址
       DATABASE_URL: ${DATABASE_URL:?请在 .env 里设置容器可达的 DATABASE_URL}
       DATA_DIR: /data
-    volumes:
-      - app_data:/data
+    user: "0:0"
+    volumes: !override
+       - "${DATA_HOST_DIR:?请设置 DATA_HOST_DIR，例 /srv/batch-inference/data}:/data"
     restart: "no"
 
   api:
@@ -37,8 +38,9 @@ services:
       DATA_DIR: /data
       # 建表交给上面的 migrate 服务
       AUTO_CREATE_TABLES: "false"
-    volumes:
-      - app_data:/data
+    user: "0:0"
+    volumes: !override
+      - "${DATA_HOST_DIR:?请设置 DATA_HOST_DIR，例 /srv/batch-inference/data}:/data"
     depends_on:
       migrate: { condition: service_completed_successfully }
     # 默认不对外发布 8000 —— nginx 在同一个 docker 网络里用 http://api:8000 直连。
@@ -56,9 +58,9 @@ services:
       REDIS_URL: ${REDIS_URL:?请在 .env 里设置容器可达的 REDIS_URL}
       DATA_DIR: /data
       AUTO_CREATE_TABLES: "false"
-    volumes:
-      # 必须和 api 共享同一个卷：输入文件与结果文件都走磁盘
-      - app_data:/data
+    user: "0:0"
+    volumes: !override
+      - "${DATA_HOST_DIR:?请设置 DATA_HOST_DIR，例 /srv/batch-inference/data}:/data"
     depends_on:
       migrate: { condition: service_completed_successfully }
     # 镜像里的 healthcheck 是给 API 用的（curl 本机 8000），worker 不监听端口，
