@@ -206,7 +206,7 @@ export default function AdminSystemPage() {
             </Tooltip>
           )}
           {!r.alive && (
-            <Tooltip title="超过 45 秒没有上报心跳，进程可能已崩溃；它持有的任务会在租约到期后自动重排">
+            <Tooltip title="超过 45 秒没有上报心跳，进程可能已崩溃；它持有的任务会在租约到期后自动重排，这条记录 10 分钟后自动清除">
               <Tag color="red">心跳超时</Tag>
             </Tooltip>
           )}
@@ -219,7 +219,8 @@ export default function AdminSystemPage() {
     },
     {
       title: '在跑任务', width: 130,
-      render: (_, r) => (
+      // 心跳超时的 jobs 是进程死前最后一次上报的快照，那些任务早已被回收重排，不能再显示
+      render: (_, r) => !r.alive ? <Typography.Text type="secondary">—</Typography.Text> : (
         <>
           {r.jobs.length} / {r.capacity}
           {r.draining && r.jobs.length === 0 && (

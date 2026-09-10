@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import json
 import time
 
 import redis.asyncio as aioredis
@@ -205,6 +206,25 @@ class JobQueue:
 
     async def list_workers(self) -> dict[str, str]:
         return await self.redis.hgetall(self.k_workers)
+
+    async def purge_dead_workers(self, max_age: float) -> list[str]:
+        """删掉心跳停了超过 max_age 秒的 worker，返回被删的 id。
+
+        worker 只有正常退出才会注销自己；被 SIGKILL / OOM / 宕机的进程会在
+        HASH 里留一条永远不更新的记录，而且重启后 id 不同，不会被覆盖。
+        """
+        now = time.time()
+        dead: list[str] = []
+        for wid, raw in (await self.list_workers()).items():
+            try:
+                ts = float(json.loads(raw).get("ts") or 0)
+            except (ValueError, TypeError, AttributeError):
+                ts = 0.0  # 解析不了的记录不可能是活着的 worker 写的
+            if now - ts > max_age:
+                dead.append(wid)
+        if dead:
+            await self.redis.hdel(self.k_workers, *dead)
+        return dead
 
     async def acquire_lock(self, name: str, ttl: int) -> bool:
         """尝试拿一把带超时的互斥锁。用于「同一时刻只允许一个 worker 做」的周期任务。

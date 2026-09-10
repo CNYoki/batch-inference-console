@@ -247,3 +247,38 @@ async def test_heartbeat_survives_drain(monkeypatch):
 
     assert len(beats) > before, "收尾期间心跳不能停"
     assert any(b.get("draining") for b in beats), "收尾期间应当上报 draining 标记"
+
+
+@pytest.mark.asyncio
+async def test_purge_dead_workers():
+    """被强杀的 worker 不会自己注销，要按心跳时间清掉；活着的不能误删。"""
+    import json as _json
+    import time as _time
+
+    from app.services.queue import JobQueue
+
+    now = _time.time()
+    workers = {
+        "alive": _json.dumps({"ts": now - 5}),
+        "timeout-recent": _json.dumps({"ts": now - 60}),   # 看板显示超时，但还没到清理线
+        "dead": _json.dumps({"ts": now - 86400}),
+        "garbage": "not json",
+        "no-ts": _json.dumps({"jobs": []}),
+    }
+
+    class FakeRedis:
+        async def hgetall(self, key):
+            return dict(workers)
+
+        async def hdel(self, key, *fields):
+            for f in fields:
+                workers.pop(f, None)
+
+    q = JobQueue(redis_url="redis://unused", prefix="t")
+    q._redis = FakeRedis()
+
+    purged = await q.purge_dead_workers(max_age=600)
+
+    assert sorted(purged) == ["dead", "garbage", "no-ts"]
+    assert sorted(workers) == ["alive", "timeout-recent"]
+    assert await q.purge_dead_workers(max_age=600) == []

@@ -91,6 +91,9 @@ services:
     # worker 不监听端口，这里关掉，否则会一直显示 unhealthy
     healthcheck:
       disable: true
+    # worker 收到 TERM 后会先把手上的任务跑完再注销自己；docker 默认只等 10 秒
+    # 就 SIGKILL，任务会被打断、看板上也会残留一条心跳超时的记录
+    stop_grace_period: 10m
     # 加机器/加副本即可扩容：docker compose up -d --scale worker=4
     deploy:
       replicas: ${WORKER_REPLICAS:-2}
