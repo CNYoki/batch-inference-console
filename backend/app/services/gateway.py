@@ -122,6 +122,8 @@ def resolve_reasoning(model_name: str, runtime: dict) -> dict:
             str(o) for o in (runtime.get("user_gateway_reasoning_effort_options") or [])
         ],
         "default_effort": str(runtime.get("user_gateway_reasoning_default_effort") or ""),
+        # 网关默认配置不带关闭片段；需要的按模型名配规则
+        "off_payload": {},
     }
     # 整个开关被管理员关掉时，规则也不必再看
     if not default["enabled"]:
@@ -136,6 +138,7 @@ def resolve_reasoning(model_name: str, runtime: dict) -> dict:
             "payload": dict(rule.get("payload") or {}),
             "effort_options": [str(o) for o in (rule.get("effort_options") or [])],
             "default_effort": str(rule.get("default_effort") or ""),
+            "off_payload": dict(rule.get("off_payload") or {}),
         }
     return default
 
@@ -171,6 +174,7 @@ def build_personal_config(model_name: str, token: str, runtime: dict) -> ModelCo
         # 只有用户主动打开时才会把 reasoning_payload 合进请求体
         reasoning_mode="optional" if reasoning["enabled"] else "off",
         reasoning_payload=reasoning["payload"],
+        reasoning_off_payload=reasoning["off_payload"],
         reasoning_effort_options=reasoning["effort_options"],
         reasoning_default_effort=reasoning["default_effort"],
         max_concurrency=int(runtime.get("user_gateway_max_concurrency") or 4),

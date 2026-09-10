@@ -102,6 +102,10 @@ export const api = {
     params?: Record<string, unknown>
   }) => http.post<Job>(`/jobs/${id}/model`, payload).then((r) => r.data),
   retryFailed: (id: string) => http.post<Job>(`/jobs/${id}/retry-failed`).then((r) => r.data),
+  // 管理员一键暂停全站排队中与运行中的任务
+  pauseAllJobs: () =>
+    http.post<{ paused: number; signaled: number; failed: number }>('/jobs/pause-all')
+      .then((r) => r.data),
   deleteJob: (id: string) => http.delete(`/jobs/${id}`),
 
   // ---------------- 用户 ----------------

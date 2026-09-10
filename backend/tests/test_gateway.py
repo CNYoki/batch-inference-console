@@ -234,6 +234,36 @@ def test_reasoning_rule_can_mark_a_model_as_unsupported():
     assert resolve_params(mc, {"reasoning": True}) == {}
 
 
+def test_reasoning_rule_off_payload():
+    """规则可以指定没开推理时附加的片段（通配规则也行）；不支持推理的模型也照样带上。
+    没配进规则列表的模型不带。"""
+    from app.services.inference import resolve_params
+
+    runtime = {
+        **DEFAULTS,
+        "user_gateway_reasoning_rules": [
+            {
+                "pattern": "qwen3-*",
+                "payload": {"chat_template_kwargs": {"enable_thinking": True}},
+                "off_payload": {"chat_template_kwargs": {"enable_thinking": False}},
+            },
+            {"pattern": "legacy-7b", "enabled": False, "off_payload": {"enable_thinking": False}},
+        ],
+    }
+    qwen = build_personal_config("qwen3-32b", "sk", runtime)
+    assert resolve_params(qwen, {}) == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert resolve_params(qwen, {"reasoning": True}) == {
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
+
+    legacy = build_personal_config("legacy-7b", "sk", runtime)
+    assert legacy.reasoning_mode == "off"
+    assert resolve_params(legacy, {"reasoning": True}) == {"enable_thinking": False}
+
+    # 没命中规则：网关默认配置不带关闭片段，请求体保持干净
+    assert resolve_params(build_personal_config("other", "sk", runtime), {}) == {}
+
+
 def test_unmatched_model_falls_back_to_gateway_default():
     from app.services.inference import resolve_params
 

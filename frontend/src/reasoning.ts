@@ -10,6 +10,8 @@ export interface ReasoningPreset {
   label: string
   hint: string
   payload: Record<string, unknown>
+  /** 没开推理时附加的片段；空对象表示不开就等于关，不用额外带字段 */
+  offPayload: Record<string, unknown>
   /** 建议给用户选的档位；空数组表示这种写法没有档位概念 */
   effortOptions: string[]
   /** 用户没选时用哪一档；空串表示取档位名单第一项 */
@@ -33,6 +35,8 @@ export const REASONING_PRESETS: ReasoningPreset[] = [
     label: 'chat_template_kwargs.enable_thinking',
     hint: 'vLLM / SGLang 自建的 Qwen3、DeepSeek 等，开关走聊天模板参数',
     payload: { chat_template_kwargs: { enable_thinking: true } },
+    // Qwen3 等模板默认就开着思考，不显式关掉会一直思考
+    offPayload: { chat_template_kwargs: { enable_thinking: false } },
     effortOptions: [],
     defaultEffort: '',
   },
@@ -41,6 +45,7 @@ export const REASONING_PRESETS: ReasoningPreset[] = [
     label: 'enable_thinking（顶层）',
     hint: '百炼 / 部分网关把开关放在请求体顶层',
     payload: { enable_thinking: true },
+    offPayload: { enable_thinking: false },
     effortOptions: [],
     defaultEffort: '',
   },
@@ -49,6 +54,7 @@ export const REASONING_PRESETS: ReasoningPreset[] = [
     label: 'reasoning_effort',
     hint: 'OpenAI o 系、GPT-5 及大多数兼容实现',
     payload: { reasoning_effort: '$effort' },
+    offPayload: {},
     effortOptions: [...EFFORT_LEVELS],
     defaultEffort: 'medium',
   },
@@ -57,6 +63,7 @@ export const REASONING_PRESETS: ReasoningPreset[] = [
     label: 'reasoning.effort',
     hint: 'OpenRouter 等把推理配置收在 reasoning 对象里',
     payload: { reasoning: { effort: '$effort' } },
+    offPayload: {},
     effortOptions: [...EFFORT_LEVELS],
     defaultEffort: 'medium',
   },
@@ -65,6 +72,7 @@ export const REASONING_PRESETS: ReasoningPreset[] = [
     label: 'thinking.budget_tokens',
     hint: 'Anthropic 兼容层，档位直接就是思考预算 token 数',
     payload: { thinking: { type: 'enabled', budget_tokens: '$effort' } },
+    offPayload: {},
     effortOptions: ['1024', '4096', '16384'],
     defaultEffort: '4096',
   },
@@ -73,6 +81,7 @@ export const REASONING_PRESETS: ReasoningPreset[] = [
     label: 'enable_thinking + thinking_budget',
     hint: 'Qwen3 系：开关与预算分开两个字段',
     payload: { enable_thinking: true, thinking_budget: '$effort' },
+    offPayload: { enable_thinking: false },
     effortOptions: ['1024', '4096', '16384'],
     defaultEffort: '4096',
   },
