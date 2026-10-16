@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Alert, App, Button, Card, Col, Collapse, Descriptions, Divider, Form, Input, InputNumber,
   Modal, Progress, Row, Select, Space, Spin, Steps, Switch, Typography, Upload,
@@ -11,6 +11,7 @@ import type {
   DryRunResult, ModelOption, ModelOptions, MyUsage, SystemSettings, UploadResult,
 } from '../api'
 import JobParamsFields, { formToParams } from '../components/JobParamsFields'
+import ProjectSelect from '../components/ProjectSelect'
 import { formatBytes, formatNumber } from '../utils'
 import { buildModelGroups, capsFor, filterModelOption, parseSelection } from '../modelSelect'
 
@@ -38,6 +39,9 @@ export default function NewJobPage() {
   const navigate = useNavigate()
   const { message } = App.useApp()
   const [form] = Form.useForm()
+  // 从项目页点「在此项目新建任务」进来时预选该项目
+  const [searchParams] = useSearchParams()
+  const initialProject = searchParams.get('project') || null
 
   const [options, setOptions] = useState<ModelOptions | null>(null)
   const [settings, setSettings] = useState<SystemSettings | null>(null)
@@ -182,6 +186,7 @@ export default function NewJobPage() {
       remember_token: rememberToken,
       concurrency: values.concurrency ?? 0,
       priority: values.priority ?? 100,
+      project_id: values.project_id ?? null,
       params,
     }
 
@@ -310,7 +315,7 @@ export default function NewJobPage() {
         </Col>
 
         <Col xs={24} lg={14}>
-          <Form form={form} layout="vertical" initialValues={{ priority: 100, concurrency: 0 }}>
+          <Form form={form} layout="vertical" initialValues={{ priority: 100, concurrency: 0, project_id: initialProject }}>
             <Card title="2. 选择模型" style={{ marginBottom: 16 }}>
               {options?.gateway_enabled && (
                 <>
@@ -397,6 +402,9 @@ export default function NewJobPage() {
             <Card title="3. 任务与推理参数">
               <Form.Item name="name" label="任务名称" rules={[{ required: true, message: '请填写任务名称' }]}>
                 <Input placeholder="例：数据标注-chunk1" maxLength={255} />
+              </Form.Item>
+              <Form.Item name="project_id" label="所属项目" extra="可选。用来归类，之后在任务列表里也能随时调整">
+                <ProjectSelect allowCreate style={{ maxWidth: 360 }} />
               </Form.Item>
 
               <JobParamsFields

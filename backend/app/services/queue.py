@@ -1,9 +1,10 @@
 """基于 Redis 的任务队列。
 
-- `{p}:queue`   ZSET  member=job_id, score=priority*1e12+入队时间戳 → 优先级 + FIFO
+- `{p}:queue`   ZSET  member=job_id, score=priority*1e12+入队时间戳 → 优先级 + FIFO；
+                置顶任务的分值是 PINNED_BASE+置顶时间戳，永远排在所有普通任务前面
 - `{p}:leases`  ZSET  member=job_id, score=租约到期时间 → worker 崩溃后自动回收
 - `{p}:owner`   HASH  job_id → worker_id
-- `{p}:ctrl:<job_id>` STRING  cancel / pause 控制信号
+- `{p}:ctrl:<job_id>` STRING  cancel / pause / requeue 控制信号
 - `{p}:workers` HASH  worker_id → 最近心跳时间
 - `{p}:job_model` HASH  job_id → 真实模型名（领取时写入，用于释放名额）
 - `{p}:model_running:<模型名>` SET  该模型正在跑的 job_id → 单模型任务数上限
@@ -67,6 +68,31 @@ CLAIM_OK = 1
 CLAIM_GONE = 0        # 已不在队列里（被别的 worker 领走、被取消）
 CLAIM_BLOCKED = -1    # 所属模型在跑的任务数已达上限
 
+# 置顶任务的分值基线：比优先级 0 的任务（分值 ≥ 0）还小，所以总在队首
+PINNED_BASE = -1e12
+
+# 管理员调整排队顺序：把这些任务现有的分值按大小排好，再按期望的先后重新分给它们。
+# 只是在它们之间互换分值，没列出来的任务位置不变。
+# 分值以字符串原样搬运 —— Lua 的数字转字符串只保留 14 位有效数字，会把时间戳截掉
+_REORDER_LUA = """
+local queue_key = KEYS[1]
+local entries = {}
+for i, job_id in ipairs(ARGV) do
+  local score = redis.call('ZSCORE', queue_key, job_id)
+  if not score then
+    return {0, i}
+  end
+  entries[i] = {tonumber(score), score}
+end
+table.sort(entries, function(a, b) return a[1] < b[1] end)
+local out = {1}
+for i, job_id in ipairs(ARGV) do
+  redis.call('ZADD', queue_key, entries[i][2], job_id)
+  out[i + 1] = entries[i][2]
+end
+return out
+"""
+
 # 把过期租约重新放回队列（保留原优先级需重新计算，这里用高优先级让它尽快被重试）
 _REAP_LUA = """
 local queue_key = KEYS[1]
@@ -92,6 +118,7 @@ class JobQueue:
         self._redis: aioredis.Redis | None = None
         self._reap_sha: str | None = None
         self._claim_job_script = None
+        self._reorder_script = None
 
     # ---------------- 连接 ----------------
     @property
@@ -107,6 +134,7 @@ class JobQueue:
             await self._redis.aclose()
             self._redis = None
             self._claim_job_script = None
+            self._reorder_script = None
 
     async def ping(self) -> bool:
         try:
@@ -145,12 +173,51 @@ class JobQueue:
         return f"{self.prefix}:progress:{job_id}"
 
     @staticmethod
-    def _score(priority: int) -> float:
-        return priority * 1e12 + time.time()
+    def _score(priority: int, *, pinned: bool = False, ts: float | None = None) -> float:
+        ts = time.time() if ts is None else ts
+        return (PINNED_BASE if pinned else priority * 1e12) + ts
+
+    @staticmethod
+    def priority_of(score: float) -> int:
+        """从分值反推优先级档位（调整顺序后回写数据库用）。"""
+        return max(0, int(score // 1e12))
 
     # ---------------- 入队 / 出队 ----------------
-    async def enqueue(self, job_id: str, priority: int = 100) -> None:
-        await self.redis.zadd(self.k_queue, {job_id: self._score(priority)})
+    async def enqueue(
+        self, job_id: str, priority: int = 100, *, pinned: bool = False, ts: float | None = None,
+    ) -> None:
+        """入队。ts 用来保住原来的先后（被置顶任务挤回队列的任务按原入队时间排），默认取当前时间。"""
+        await self.redis.zadd(self.k_queue, {job_id: self._score(priority, pinned=pinned, ts=ts)})
+
+    async def rescore(
+        self, job_id: str, priority: int = 100, *, pinned: bool = False, ts: float | None = None,
+    ) -> bool:
+        """只给已经在队列里的任务换分值（置顶/取消置顶），不在队列里就什么也不做。"""
+        changed = await self.redis.zadd(
+            self.k_queue, {job_id: self._score(priority, pinned=pinned, ts=ts)}, xx=True, ch=True,
+        )
+        return bool(changed) or await self.redis.zscore(self.k_queue, job_id) is not None
+
+    async def reorder(self, job_ids: list[str]) -> dict[str, float]:
+        """按给定先后重排这些排队中的任务，返回每个任务的新分值。
+
+        有任务已不在队列里（刚被领走、被取消）就整体不动，抛 KeyError 带上那个 id。
+        """
+        if self._reorder_script is None:
+            self._reorder_script = self.redis.register_script(_REORDER_LUA)
+        result = await self._reorder_script(keys=[self.k_queue], args=job_ids)
+        if int(result[0]) != 1:
+            raise KeyError(job_ids[int(result[1]) - 1])
+        return {jid: float(score) for jid, score in zip(job_ids, result[1:], strict=True)}
+
+    async def queued_count(self) -> int:
+        return int(await self.redis.zcard(self.k_queue))
+
+    async def running_on_model(self, model: str) -> set[str]:
+        """领取时登记在该模型名下、还没释放的任务（含刚领到、库里还是 queued 的）。"""
+        if not model:
+            return set()
+        return set(await self.redis.smembers(self.k_model_running(model)))
 
     async def remove(self, job_id: str) -> None:
         """从队列与租约中彻底摘除（取消任务时用）。"""
@@ -191,6 +258,10 @@ class JobQueue:
             args=[job_id, worker_id, str(time.time() + lease), model, str(limit)],
         ))
 
+    async def has_lease(self, job_id: str) -> bool:
+        """是否有 worker 正持有它（含刚领到、还没来得及改库状态的）。"""
+        return await self.redis.zscore(self.k_lease, job_id) is not None
+
     async def renew_lease(self, job_id: str, lease_seconds: int | None = None) -> None:
         lease = lease_seconds or settings.job_lease_seconds
         await self.redis.zadd(self.k_lease, {job_id: time.time() + lease})
@@ -218,9 +289,12 @@ class JobQueue:
         return list(result or [])
 
     # ---------------- 控制信号 ----------------
-    async def signal(self, job_id: str, action: str, ttl: int = 86400) -> None:
-        """action: cancel | pause。worker 在处理循环中轮询该键。"""
-        await self.redis.set(self.k_ctrl(job_id), action, ex=ttl)
+    async def signal(self, job_id: str, action: str, ttl: int = 86400, *, only_if_absent: bool = False) -> None:
+        """action: cancel | pause | requeue。worker 在处理循环中轮询该键。
+
+        only_if_absent：已经有信号就不覆盖 —— 置顶抢占发的 requeue 不能盖掉用户的取消/暂停。
+        """
+        await self.redis.set(self.k_ctrl(job_id), action, ex=ttl, nx=only_if_absent)
 
     async def get_signal(self, job_id: str) -> str | None:
         return await self.redis.get(self.k_ctrl(job_id))
