@@ -103,6 +103,7 @@ async def fetch_models(base_url: str, token: str, *, platform: bool = False) -> 
 # 独立计费模式
 # --------------------------------------------------------------------------- #
 BILLING_PATH = "/api/batch/billing"
+BATCH_GROUP = "batch"
 USAGE_PATH = "/api/usage/token/"
 
 
@@ -111,33 +112,117 @@ def billing_mode(runtime: dict) -> bool:
     return bool(runtime.get("user_gateway_billing_enabled"))
 
 
+# 透传用户 Key 时的占位：配置检查不需要真的 Key，只要知道「这里会有 Key」
+_USER_KEY_PLACEHOLDER = "<user-key>"
+
+
 def inference_endpoint(runtime: dict, user_token: str) -> tuple[str, str]:
-    """执行推理用的地址和 Key：独立计费时是平台的推理接口，否则是网关 + 用户 token。"""
+    """执行推理用的地址和 Key：独立计费时是平台的推理接口，否则是网关 + 用户 token。
+
+    推理接口的 Key 可以设成透传用户 Key —— 推理接口本身就认用户的 Key 时用。
+    """
     if billing_mode(runtime):
-        key = decrypt_secret(runtime.get("user_gateway_inference_api_key_encrypted") or "") or ""
+        if runtime.get("user_gateway_inference_key_passthrough"):
+            key = user_token
+        else:
+            key = decrypt_secret(runtime.get("user_gateway_inference_api_key_encrypted") or "") or ""
         return (runtime.get("user_gateway_inference_base_url") or "").rstrip("/"), key
     return (runtime.get("user_gateway_base_url") or DEFAULTS["user_gateway_base_url"]).rstrip("/"), user_token
 
 
 def billing_endpoint(runtime: dict) -> tuple[str, str]:
-    """计费接口地址和管理员访问令牌（nap_...）。没配齐时返回空串。"""
+    """计费接口地址和管理员访问令牌（nap_...）。没配齐、或设成透传用户 Key 时令牌为空串。"""
+    if runtime.get("user_gateway_billing_key_passthrough"):
+        return (runtime.get("user_gateway_billing_url") or "").strip(), ""
     token = decrypt_secret(runtime.get("user_gateway_billing_token_encrypted") or "") or ""
     return (runtime.get("user_gateway_billing_url") or "").strip(), token
 
 
-def billing_config_error(runtime: dict) -> str | None:
-    """独立计费模式下配置缺了哪样。返回 None 表示齐了。"""
-    base, key = inference_endpoint(runtime, "")
-    if not base:
-        return "管理员尚未配置个人网关的推理接口地址"
-    if runtime.get("user_gateway_inference_api_key_encrypted") and not key:
-        return "推理接口 API Key 无法解密（SECRET_KEY 可能已变更），请管理员重新填写"
+def billing_auth(runtime: dict, user_key: str) -> str:
+    """调计费接口时 Authorization 用的 Key：平台访问令牌，或透传用户 Key。"""
+    if runtime.get("user_gateway_billing_key_passthrough"):
+        return user_key
+    return billing_endpoint(runtime)[1]
+
+
+def billing_endpoint_error(runtime: dict) -> str | None:
+    """计费接口没配齐时返回原因。"""
     url, token = billing_endpoint(runtime)
     if not url:
         return "管理员尚未配置个人网关的计费接口地址"
-    if not token:
+    if not token and not runtime.get("user_gateway_billing_key_passthrough"):
         return "管理员尚未配置计费接口的访问令牌，或令牌无法解密"
     return None
+
+
+def billing_applies(model_name: str, runtime: dict) -> bool:
+    """这个模型要不要走计费接口。
+
+    独立计费开着时默认所有模型都计费；打开「仅单独配置的模型计费」后，
+    只有命中了打开「模型独立计费」的分模型配置的模型才计费，其余模型照常推理、不调计费接口。
+    """
+    if not billing_mode(runtime):
+        return False
+    if not runtime.get("user_gateway_billing_only_matched"):
+        return True
+    rule = match_rule(model_name, runtime)
+    return bool(rule and rule.get("billing_override"))
+
+
+def billing_config_error(runtime: dict, model_name: str | None = None) -> str | None:
+    """独立计费模式下配置缺了哪样。返回 None 表示齐了。
+
+    给了模型名时按该模型实际走的推理接口检查（分模型配置可以单独指定推理接口），
+    这个模型不计费时也就不要求计费接口。
+    """
+    rule = match_rule(model_name, runtime) if model_name is not None else None
+    if model_name is None:
+        base, key = inference_endpoint(runtime, _USER_KEY_PLACEHOLDER)
+    else:
+        base, key, _ = resolve_route(model_name, runtime, _USER_KEY_PLACEHOLDER)
+    if not base:
+        return "管理员尚未配置个人网关的推理接口地址"
+    # 推理接口可以不要 Key（内网自建）；只有填了却解不开时才报错
+    key_stored = bool(
+        (rule and rule.get("billing_override") and rule.get("inference_api_key_encrypted"))
+        or runtime.get("user_gateway_inference_api_key_encrypted")
+    )
+    if key_stored and not key:
+        return "推理接口 API Key 无法解密（SECRET_KEY 可能已变更），请管理员重新填写"
+    if model_name is not None and not billing_applies(model_name, runtime):
+        return None
+    return billing_endpoint_error(runtime)
+
+
+def match_rule(model_name: str, runtime: dict) -> dict | None:
+    """按顺序找第一条命中模型名的分模型配置。"""
+    for rule in runtime.get("user_gateway_reasoning_rules") or []:
+        pattern = str(rule.get("pattern") or "")
+        if pattern and fnmatch(model_name, pattern):
+            return rule
+    return None
+
+
+def resolve_route(model_name: str, runtime: dict, user_token: str) -> tuple[str, str, str]:
+    """执行推理用的地址、Key 和实际请求的模型名。
+
+    独立计费时，命中的分模型配置打开了「模型独立计费」，就用它的推理接口、Key 和重定向模型名，
+    哪一项留空就退回全局推理接口的那一项（模型名退回用户看到的名字）。
+    全局独立计费没开时分模型的这几项一概不看。
+    """
+    base, key = inference_endpoint(runtime, user_token)
+    upstream = model_name
+    if not billing_mode(runtime):
+        return base, key, upstream
+    rule = match_rule(model_name, runtime)
+    if rule and rule.get("billing_override"):
+        base = (rule.get("inference_base_url") or "").rstrip("/") or base
+        if rule.get("inference_key_passthrough"):
+            key = user_token
+        else:
+            key = decrypt_secret(rule.get("inference_api_key_encrypted") or "") or key
+        upstream = (rule.get("upstream_model") or "").strip() or upstream
+    return base, key, upstream
 
 
 def usage_url(billing_url: str) -> str:
@@ -156,6 +241,8 @@ class KeyInfo:
     """用户 batch Key 的额度信息，只用来提示和过滤模型，不作为能否扣费的依据。"""
 
     name: str = ""
+    # Key 所属分组；网关没返回时为 None
+    group: str | None = None
     # 网关内部额度单位（默认 500000 = $1）
     total_available: int | None = None
     unlimited: bool = False
@@ -219,8 +306,10 @@ async def check_billing_key(runtime: dict, key: str) -> KeyInfo | None:
         raise GatewayError(f"Key 不可用：{str(payload.get('message') or '网关拒绝')[:300]}")
 
     data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    group = data.get("group") or data.get("token_group")
     return KeyInfo(
         name=str(data.get("name") or ""),
+        group=str(group) if group else None,
         total_available=_as_int(data.get("total_available")),
         unlimited=bool(data.get("unlimited_quota")),
         expires_at=_as_int(data.get("expires_at")),
@@ -234,10 +323,14 @@ async def list_user_models(runtime: dict, token: str) -> tuple[list[str], KeyInf
     两种模式都用用户自己的 Key 去个人网关地址拉模型 —— 有哪些模型权限仍由网关判定；
     独立计费时只是执行推理改走平台的推理接口。
     """
-    if billing_mode(runtime) and (problem := billing_config_error(runtime)):
+    # 推理接口可以按模型单独配，这里只确认计费接口齐了；选定模型后再查推理接口
+    if billing_mode(runtime) and (problem := billing_endpoint_error(runtime)):
         raise GatewayError(problem)
     info = await check_billing_key(runtime, token) if billing_mode(runtime) else None
     return await fetch_models(runtime["user_gateway_base_url"], token), info
+
+
+NOT_BATCH_MESSAGE = "只能添加 batch 分组的 Key，请在个人网关的 API 令牌里新建一个分组为 batch 的 Key"
 
 
 def _parse_models(payload: Any) -> list[str]:
@@ -289,10 +382,8 @@ def resolve_reasoning(model_name: str, runtime: dict) -> dict:
     if not default["enabled"]:
         return default
 
-    for rule in runtime.get("user_gateway_reasoning_rules") or []:
-        pattern = str(rule.get("pattern") or "")
-        if not pattern or not fnmatch(model_name, pattern):
-            continue
+    rule = match_rule(model_name, runtime)
+    if rule is not None:
         return {
             "enabled": bool(rule.get("enabled", True)),
             "payload": dict(rule.get("payload") or {}),
@@ -301,6 +392,19 @@ def resolve_reasoning(model_name: str, runtime: dict) -> dict:
             "off_payload": dict(rule.get("off_payload") or {}),
         }
     return default
+
+
+def uses_key_passthrough(model_name: str, runtime: dict) -> bool:
+    """这个模型的推理请求是不是透传用户 Key（与 resolve_route 的取 Key 逻辑一致）。"""
+    if not billing_mode(runtime):
+        return False
+    rule = match_rule(model_name, runtime)
+    if rule and rule.get("billing_override"):
+        if rule.get("inference_key_passthrough"):
+            return True
+        if decrypt_secret(rule.get("inference_api_key_encrypted") or ""):
+            return False
+    return bool(runtime.get("user_gateway_inference_key_passthrough"))
 
 
 def build_personal_config(model_name: str, token: str, runtime: dict) -> ModelConfig:
@@ -312,13 +416,14 @@ def build_personal_config(model_name: str, token: str, runtime: dict) -> ModelCo
     from ..core.security import encrypt_secret
 
     reasoning = resolve_reasoning(model_name, runtime)
-    # 独立计费时推理用平台的 Key，用户的 token 只拿来扣费
-    base_url, api_key = inference_endpoint(runtime, token)
-    return ModelConfig(
+    # 独立计费时推理用平台的 Key（可按模型单独指定接口和重定向模型名），用户的 token 只拿来扣费。
+    # display_name 是用户看到的名字，model_name 是真正发给推理接口的名字
+    base_url, api_key, upstream = resolve_route(model_name, runtime, token)
+    mc = ModelConfig(
         name=f"__personal__:{model_name}",
         display_name=model_name,
         base_url=base_url,
-        model_name=model_name,
+        model_name=upstream,
         # InferenceClient 统一走解密路径，这里也加密一次保持一致
         api_key_encrypted=encrypt_secret(api_key) if api_key else None,
         endpoint_path="/chat/completions",
@@ -347,4 +452,8 @@ def build_personal_config(model_name: str, token: str, runtime: dict) -> ModelCo
         max_tokens_cap=int(runtime.get("user_gateway_max_tokens_cap") or 0),
         sort_order=0,
     )
+    if uses_key_passthrough(model_name, runtime):
+        # 透传用户 Key 时带上 batch 标识，网关据此认出是批量平台的请求（见 build_request_body）
+        mc.body_marker = dict(runtime.get("user_gateway_passthrough_marker") or {})
+    return mc
 

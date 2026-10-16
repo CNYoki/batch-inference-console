@@ -104,6 +104,7 @@ export default function NewJobPage() {
         ...prev, personal: res.models, personal_error: null,
         personal_reasoning: res.reasoning ?? {},
         personal_key: res.key ?? null,
+        personal_billing: res.billing ?? {},
         has_saved_token: prev.has_saved_token || res.saved,
       })
       setEditingToken(false)
@@ -207,9 +208,12 @@ export default function NewJobPage() {
         setDry({ phase: 'failed', job, error: res.error || '试跑失败', result: res })
         return
       }
+      // 独立计费时试跑那条也要扣费；扣不上就不提交 —— 整批跑起来同样扣不上
+      if (res.billing_ok === false) {
+        setDry({ phase: 'failed', job, error: res.billing || '试跑计费失败', result: res })
+        return
+      }
       setDry({ phase: 'submitting', job, result: res })
-      // 独立计费时试跑那条也会扣费；扣不上的提醒一下，任务照常提交
-      if (res.billing?.includes('失败')) message.warning(res.billing, 6)
       await submitJob(job)
     } catch (err) {
       setDry({
@@ -220,6 +224,7 @@ export default function NewJobPage() {
   }
 
   const modelGroups = useMemo(() => buildModelGroups(options), [options])
+  const billingFailed = !!dry?.result?.ok && dry.result.billing_ok === false
 
   const step = !upload || upload.errors.length ? 0 : selection ? 2 : 1
 
@@ -411,10 +416,12 @@ export default function NewJobPage() {
 
               {selection?.source === 'personal' && (
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  {options?.gateway_billing
+                  {options?.gateway_billing && options.personal_billing?.[selection.key] !== false
                     ? `该任务由平台执行推理，按用量每 ${settings?.user_gateway_billing_interval ?? 60} 秒`
                       + `从你的 ${options?.gateway_label} 账户扣一次费；余额不足时任务会自动暂停，充值后点「继续」即可。并发上限 `
-                    : `该任务将以你的 token 调用 ${options?.gateway_label}，并发上限 `}
+                    : options?.gateway_billing
+                      ? `该模型由平台执行推理、不单独计费，并发上限 `
+                      : `该任务将以你的 token 调用 ${options?.gateway_label}，并发上限 `}
                   {settings?.user_gateway_max_concurrency ?? 4}。
                 </Typography.Text>
               )}
@@ -477,10 +484,13 @@ export default function NewJobPage() {
         onCancel={() => setDry(null)}
         footer={dry?.phase === 'failed' ? [
           <Button key="back" type="primary" onClick={() => setDry(null)}>返回修改</Button>,
-          <Button key="force" danger loading={submitting}
-            onClick={() => dry && void submitJob(dry.job)}>
-            仍要提交
-          </Button>,
+          // 扣费失败不给绕过：整批跑起来同样扣不上
+          ...(billingFailed ? [] : [
+            <Button key="force" danger loading={submitting}
+              onClick={() => dry && void submitJob(dry.job)}>
+              仍要提交
+            </Button>,
+          ]),
         ] : null}
       >
         {dry?.phase !== 'failed' ? (
@@ -505,7 +515,10 @@ export default function NewJobPage() {
           </Space>
         ) : (
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
-            <Alert type="error" showIcon message="试跑没通过，任务还没有提交"
+            <Alert type="error" showIcon
+              message={billingFailed
+                ? '模型调用成功，但扣费失败，任务还没有提交'
+                : '试跑没通过，任务还没有提交'}
               description={dry.error} />
             {dry.result && (
               <Descriptions size="small" column={2} bordered>
@@ -540,7 +553,9 @@ export default function NewJobPage() {
               ]} />
             )}
             <Typography.Text type="secondary">
-              改完参数再点一次「提交任务」会重新试跑。如果只是网关抖了一下，也可以直接「仍要提交」。
+              {billingFailed
+                ? '处理好扣费问题（充值、调高 Key 额度等）后，再点一次「提交任务」会重新试跑。'
+                : '改完参数再点一次「提交任务」会重新试跑。如果只是网关抖了一下，也可以直接「仍要提交」。'}
             </Typography.Text>
           </Space>
         )}
