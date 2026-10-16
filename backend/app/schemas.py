@@ -199,7 +199,7 @@ class ModelConfigOut(ModelConfigBase):
 
 
 class GatewayReasoningRule(BaseModel):
-    """个人网关里按模型名生效的推理配置。
+    """个人网关的分模型配置：推理开关，以及（独立计费时）单独的推理接口。
 
     个人模型不在库里，只能靠模型名匹配 —— pattern 支持 * 通配，
     例如 qwen3-* 一条就能覆盖同系列所有模型。按顺序取第一条命中的规则。
@@ -214,6 +214,27 @@ class GatewayReasoningRule(BaseModel):
     off_payload: dict[str, Any] = Field(default_factory=dict)
     effort_options: list[str] = Field(default_factory=list, max_length=16)
     default_effort: str = Field(default="", max_length=32)
+
+    # ---- 模型独立计费：只在全局独立计费开启时生效 ----
+    # 规则的稳定标识，保存时靠它找回这条规则已存的 API Key；新规则由后端生成
+    id: str | None = Field(default=None, max_length=32)
+    billing_override: bool = False
+    # 留空就用全局推理接口的地址 / Key
+    inference_base_url: str = Field(default="", max_length=1024)
+    # 只写：传新值才覆盖，空串 = 清除，不传 = 保持
+    inference_api_key: str | None = Field(default=None, max_length=1024)
+    # 只读：已存 Key 的掩码
+    inference_api_key_masked: str | None = None
+    # 实际请求推理接口时用的模型名，不展示给用户；留空就用 pattern 命中的模型名本身
+    upstream_model: str = Field(default="", max_length=255)
+
+    @field_validator("inference_base_url")
+    @classmethod
+    def _check_url(cls, v: str) -> str:
+        v = v.strip()
+        if v and not v.startswith(("http://", "https://")):
+            raise ValueError("推理接口地址必须以 http:// 或 https:// 开头")
+        return v.rstrip("/")
 
 
 class ModelJobLimit(BaseModel):
@@ -266,6 +287,8 @@ class ModelOption(BaseModel):
 
 class PersonalKeyInfo(BaseModel):
     name: str = ""
+    # Key 所属分组；网关没返回时为 None
+    group: str | None = None
     # 网关内部额度单位（默认 500000 = $1）
     total_available: int | None = None
     unlimited: bool = False
@@ -467,6 +490,8 @@ class JobDryRunOut(BaseModel):
     response: dict[str, Any] | None = None
     # 独立计费时试跑的扣费结果；None 表示不涉及计费
     billing: str | None = None
+    # False = 扣费失败或计费接口不通，前端据此不提交任务；None = 不涉及计费
+    billing_ok: bool | None = None
 
 
 class PauseAllOut(BaseModel):
@@ -798,6 +823,7 @@ class SystemSettingsOut(BaseModel):
     user_gateway_billing_url: str = ""
     user_gateway_billing_token_masked: str | None = None
     user_gateway_billing_interval: int = 60
+    user_gateway_billing_require_batch_key: bool = False
 
     # ---- 单模型同时运行的任务数上限 ----
     model_job_limits: list[ModelJobLimit] = Field(default_factory=list)
@@ -872,6 +898,7 @@ class SystemSettingsUpdate(BaseModel):
     user_gateway_billing_url: str | None = Field(default=None, max_length=1024)
     user_gateway_billing_token: str | None = Field(default=None, max_length=1024)
     user_gateway_billing_interval: int | None = Field(default=None, ge=10, le=3600)
+    user_gateway_billing_require_batch_key: bool | None = None
 
     file_retention_days: int | None = Field(default=None, ge=0, le=3650)
     purge_input_files: bool | None = None

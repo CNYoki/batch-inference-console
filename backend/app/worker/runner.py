@@ -171,6 +171,7 @@ class JobRunner:
         concurrency: int, stop_event: asyncio.Event,
     ) -> None:
         sem = asyncio.Semaphore(max(1, concurrency))
+        alias = mc.display_name if job.model_source == ModelSource.personal and mc.model_name != mc.display_name else None
         system_prompt = (job.resolved_params or {}).get("_system_prompt")
         resolved = {k: v for k, v in (job.resolved_params or {}).items() if not k.startswith("_")}
         pending: set[asyncio.Task] = set()
@@ -195,6 +196,9 @@ class JobRunner:
                         "status_code": None, "attempts": 1, "message": str(exc)[:4000],
                     })
                 else:
+                    if alias and isinstance(result.response, dict) and result.response.get("model") == mc.model_name:
+                        # 重定向的模型名不进结果文件，用户看到的始终是自己选的那个
+                        result.response["model"] = alias
                     await writer.write_success(index, custom_id, result)
                     await self._bump(
                         completed=1,
@@ -413,7 +417,7 @@ class JobRunner:
                 if not runtime["user_gateway_enabled"]:
                     return job, None, "管理员已关闭个人网关"
                 if billing_mode(runtime):
-                    if problem := billing_config_error(runtime):
+                    if problem := billing_config_error(runtime, job.personal_model_name):
                         return job, None, problem
                     self._billing = True
                     self._billing_interval = billing.interval_of(runtime)

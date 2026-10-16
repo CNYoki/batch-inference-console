@@ -94,6 +94,7 @@ export interface PersonalModels {
 /** 独立计费时用户 batch Key 的额度（网关内部单位，默认 500000 = $1） */
 export interface PersonalKeyInfo {
   name: string
+  group?: string | null
   total_available?: number | null
   unlimited: boolean
   expires_at?: number | null
@@ -116,6 +117,15 @@ export interface GatewayReasoningRule {
   off_payload: Record<string, unknown>
   effort_options: string[]
   default_effort: string
+  /** 模型独立计费：只在全局独立计费开启时生效 */
+  id?: string | null
+  billing_override?: boolean
+  inference_base_url?: string
+  /** 只写：传新值才覆盖，空串清除 */
+  inference_api_key?: string | null
+  inference_api_key_masked?: string | null
+  /** 实际请求推理接口时用的模型名，不展示给用户 */
+  upstream_model?: string
 }
 
 export interface Job {
@@ -254,6 +264,8 @@ export interface SystemSettings {
   user_gateway_billing_url: string
   user_gateway_billing_token_masked?: string | null
   user_gateway_billing_interval: number
+  /** 限制 API Key 添加：只接受 batch 分组的 Key */
+  user_gateway_billing_require_batch_key: boolean
 
   model_job_limits: ModelJobLimit[]
 
@@ -401,6 +413,8 @@ export interface DryRunResult {
   response?: Record<string, unknown> | null
   /** 独立计费时试跑的扣费结果 */
   billing?: string | null
+  /** false = 扣费失败或计费接口不通，不提交任务 */
+  billing_ok?: boolean | null
 }
 
 /** 项目：把任务和 Prompt 归到一起，只对本人可见 */

@@ -57,6 +57,8 @@ DEFAULTS: dict = {
     "user_gateway_billing_token_encrypted": "",
     # 运行中的任务每隔多少秒把新增用量扣一次费；暂停、取消、完成时也会立即结算
     "user_gateway_billing_interval": 60,
+    # 限制 API Key 添加：用户填的 Key 不是 batch 分组就直接拒绝（靠 Key 用量查询接口返回的 group 判断）
+    "user_gateway_billing_require_batch_key": False,
     # ---- 单模型同时运行的任务数上限（所有 worker 合计）----
     # 按真实模型名匹配：公用模型取配置里的 model_name，个人网关模型取网关里的模型名。
     # [{"pattern": "qwen3.8-27b", "max_running_jobs": 4}]

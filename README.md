@@ -53,12 +53,20 @@ Browser ──► API (FastAPI) ──► MySQL / PostgreSQL   (metadata, state)
   `bic-<job>-<seq>`) in the same transaction that advances the job's billed counters, so retries
   after timeouts or crashes never double-charge. A rejected charge (insufficient balance, bad
   Key, …) pauses the job; resuming re-sends the unpaid records first. Admins see every record
-  under **Billing records** and can test both endpoints from the settings page
+  under **Billing records** and can test both endpoints from the settings page. The pre-submit
+  dry run is billed too, and the job is not submitted if that charge fails. An optional
+  "restrict API key" switch rejects any Key whose group (as reported by the gateway's
+  `/api/usage/token/`) is not `batch`
+- **Per-model config** for gateway models: besides the reasoning toggle, a rule can turn on
+  per-model billing routing — its own inference endpoint / key and a redirect model name (the
+  name actually sent upstream, never shown to users; results and dry-run echoes show the
+  user-facing name). Empty fields fall back to the global inference endpoint, and the whole
+  thing is ignored unless global separate billing is on
 - Reasoning/thinking toggle per model: pick the request-body fragment from presets
   (`chat_template_kwargs.enable_thinking`, `reasoning_effort`, `thinking.budget_tokens`, …)
   or write your own; effort levels (`none` … `max`, or raw token budgets) are configurable
   per model and picked by users on a slider when creating a job
-- Personal-gateway models aren't in the database, so their reasoning config is matched by model
+- Personal-gateway models aren't in the database, so their per-model config is matched by model
   name (`qwen3-*`, first rule wins) with a gateway-wide default behind it
 
 **Operations**

@@ -20,8 +20,9 @@ type UsageRow = {
   prompt_tokens: number; completion_tokens: number; storage_bytes: number
 }
 
-/** 推理规则在表单里的形态：payload 是 JSON 文本，preset 只用于填表 */
+/** 分模型配置在表单里的形态：payload 是 JSON 文本，preset 只用于填表 */
 type RuleForm = {
+  id?: string | null
   pattern: string
   enabled?: boolean
   payload?: string
@@ -29,6 +30,12 @@ type RuleForm = {
   effort_options?: string[]
   default_effort?: string
   preset?: string
+  billing_override?: boolean
+  inference_base_url?: string
+  /** 只写：留空表示不修改 */
+  inference_api_key?: string
+  inference_api_key_masked?: string | null
+  upstream_model?: string
 }
 
 /** 表单里的 JSON 文本框：空串按 {} 处理，非法 JSON 抛出让上层提示 */
@@ -84,6 +91,7 @@ export default function AdminSystemPage() {
           payload: JSON.stringify(r.payload ?? {}, null, 2),
           off_payload: JSON.stringify(r.off_payload ?? {}, null, 2),
           preset: matchPreset(r.payload, r.effort_options),
+          inference_api_key: '',
         })),
       })
     }).catch(() => undefined)
@@ -148,6 +156,8 @@ export default function AdminSystemPage() {
           ? { user_gateway_billing_url: values.user_gateway_billing_url } : {}),
         ...(values.user_gateway_billing_interval !== undefined
           ? { user_gateway_billing_interval: values.user_gateway_billing_interval } : {}),
+        ...(values.user_gateway_billing_require_batch_key !== undefined
+          ? { user_gateway_billing_require_batch_key: values.user_gateway_billing_require_batch_key } : {}),
         // 密钥只在真的输入了新值时才提交，留空 = 保持原值
         ...(values.user_gateway_inference_api_key
           ? { user_gateway_inference_api_key: values.user_gateway_inference_api_key } : {}),
@@ -172,6 +182,12 @@ export default function AdminSystemPage() {
             off_payload: parseJson(r.off_payload),
             effort_options: r.effort_options ?? [],
             default_effort: r.default_effort ?? '',
+            // 规则 id 用来在后端找回已存的 API Key；Key 只在填了新值时提交
+            id: r.id ?? null,
+            billing_override: !!r.billing_override,
+            inference_base_url: (r.inference_base_url ?? '').trim(),
+            upstream_model: (r.upstream_model ?? '').trim(),
+            ...(r.inference_api_key ? { inference_api_key: r.inference_api_key } : {}),
           })),
         model_job_limits: (values.model_job_limits ?? [])
           .filter((r: ModelJobLimit) => r?.pattern?.trim())
@@ -212,6 +228,7 @@ export default function AdminSystemPage() {
           payload: JSON.stringify(r.payload ?? {}, null, 2),
           off_payload: JSON.stringify(r.off_payload ?? {}, null, 2),
           preset: matchPreset(r.payload, r.effort_options),
+          inference_api_key: '',
         })),
       })
       message.success('设置已保存')
@@ -476,6 +493,11 @@ export default function AdminSystemPage() {
                 </Col>
               </Row>
               <Space size={24} align="start" wrap>
+                <Form.Item name="user_gateway_billing_require_batch_key" label="限制API key添加"
+                  valuePropName="checked"
+                  extra="打开后用户添加的 Key 必须属于 batch 分组，否则直接拒绝">
+                  <Switch />
+                </Form.Item>
                 <Form.Item name="user_gateway_billing_interval" label="计费间隔(秒)"
                   extra="运行中的任务每隔这么久把新增用量扣一次费；暂停、取消、完成时立即结算">
                   <InputNumber min={10} max={3600} style={{ width: 140 }} />
@@ -543,9 +565,9 @@ export default function AdminSystemPage() {
             </Form.Item>
           </Space>
 
-          <Divider orientation="left" plain>按模型名的推理配置</Divider>
+          <Divider orientation="left" plain>分模型配置</Divider>
           <Typography.Paragraph type="secondary">
-            同一个网关上不同系列模型的开法不一样，可以按模型名单独配。
+            同一个网关上不同系列模型的推理开法、推理接口可能不一样，可以按模型名单独配。
             模型名支持 <code>*</code> 通配（例 <code>qwen3-*</code>），
             <b>按顺序取第一条命中的</b>；都没命中就用上面那份默认配置。
           </Typography.Paragraph>
@@ -595,11 +617,38 @@ export default function AdminSystemPage() {
                             .map((v) => ({ value: v, label: v }))} />
                       </Form.Item>
                     </Space>
+                    <Form.Item {...rest} name={[name, 'billing_override']} label="模型独立计费"
+                      valuePropName="checked"
+                      extra={billingOn
+                        ? '打开后这些模型可单独指定推理接口和实际请求的模型名；留空的项沿用全局推理接口'
+                        : '全局「独立计费」未开启，这里的配置不会生效'}>
+                      <Switch />
+                    </Form.Item>
+                    {rules?.[name]?.billing_override && (
+                      <Space size={24} align="start" wrap>
+                        <Form.Item {...rest} name={[name, 'inference_base_url']} label="推理接口 URL"
+                          extra="留空用全局推理接口"
+                          rules={[{ pattern: /^https?:\/\//, message: '必须以 http:// 或 https:// 开头' }]}>
+                          <Input className="mono" placeholder="https://inference.example.com/v1" style={{ width: 320 }} />
+                        </Form.Item>
+                        <Form.Item {...rest} name={[name, 'inference_api_key']} label="推理接口 API Key"
+                          extra={rules?.[name]?.inference_api_key_masked
+                            ? `当前：${rules[name].inference_api_key_masked}，留空表示不修改`
+                            : '留空用全局推理接口的 Key'}>
+                          <Input.Password className="mono" autoComplete="new-password" style={{ width: 260 }}
+                            placeholder={rules?.[name]?.inference_api_key_masked ? '不修改请留空' : 'sk-...'} />
+                        </Form.Item>
+                        <Form.Item {...rest} name={[name, 'upstream_model']} label="重定向模型名"
+                          extra="实际请求推理接口时用的模型名，不会展示给用户；留空用原模型名">
+                          <Input className="mono" placeholder="例：Qwen/Qwen3-32B" style={{ width: 240 }} />
+                        </Form.Item>
+                      </Space>
+                    )}
                   </div>
                 ))}
                 <Button type="dashed" onClick={() => add({ enabled: true, payload: '{}', off_payload: '{}' })}
                   style={{ marginBottom: 16 }}>
-                  + 添加模型规则
+                  + 添加模型配置
                 </Button>
               </>
             )}
