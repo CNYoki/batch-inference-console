@@ -72,11 +72,6 @@ export default function AdminBillingPage() {
             valueStyle={counts.failed ? { color: 'var(--ant-color-error, #ff4d4f)' } : undefined}
           />
         </Space>
-        <Typography.Paragraph type="secondary" style={{ margin: '12px 0 0' }}>
-          个人网关独立计费时，运行中的任务按设定间隔把新增用量切成一笔上报，暂停、取消、完成时立即结算。
-          待扣费的由 worker 自动退避重试；被网关拒绝的（余额不足、Key 失效等）需处理后重发 ——
-          同一笔的请求 ID 不变，网关不会重复扣费。
-        </Typography.Paragraph>
       </Card>
 
       <Card

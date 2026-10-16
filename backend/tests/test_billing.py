@@ -66,7 +66,7 @@ class FakeGateway:
         if url == "http://gw.test/v1/models":
             # 拉模型仍是用户 Key 走个人网关
             assert request.headers["authorization"] == "Bearer sk-batch"
-            return httpx.Response(200, json={"data": [{"id": "gw-m"}]})
+            return httpx.Response(200, json={"data": [{"id": "gw-m"}, {"id": "gw-other"}]})
         if url.startswith("http://gw.test/api/usage/token"):
             if request.headers["authorization"] != "Bearer sk-batch":
                 return httpx.Response(401, json={"success": False, "message": "无效的令牌"})
@@ -353,7 +353,7 @@ async def test_models_come_from_gateway_with_user_key(gw):
                "user_gateway_inference_api_key_encrypted": encrypt_secret("platform-key"),
                "user_gateway_billing_token_encrypted": encrypt_secret("nap-token")}
     models, info = await list_user_models(runtime, "sk-batch")
-    assert models == ["gw-m"]
+    assert models == ["gw-m", "gw-other"]
     assert info.total_available == 123456 and info.model_limits == ["gw-m"]
 
     with pytest.raises(GatewayError, match="Key 不可用"):
@@ -545,3 +545,53 @@ async def test_change_model_settles_old_model_first(admin_client: AsyncClient, b
     async with session_scope() as db:
         await db.delete(await db.get(Job, job_id))
         await db.delete(await db.get(ModelConfig, mc_id))
+
+
+@pytest.mark.asyncio
+async def test_billing_admin_endpoints_reject_normal_users(admin_client: AsyncClient):
+    name = f"billuser-{uuid.uuid4().hex[:6]}"
+    await admin_client.post("/api/admin/users", json={"username": name, "password": "UserPass123!", "role": "user"})
+    async with AsyncClient(transport=admin_client._transport, base_url="http://test") as c:
+        assert (await c.post("/api/auth/login", json={"username": name, "password": "UserPass123!"})).status_code == 200
+        assert (await c.get("/api/admin/billing/records")).status_code == 403
+        assert (await c.post("/api/admin/billing/records/1/retry")).status_code == 403
+        assert (await c.post("/api/admin/billing/test")).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_switching_between_gateway_models_bills_each_model_separately(
+    admin_client: AsyncClient, gw, billing_runtime,
+):
+    """中途换模型：换之前的用量记在旧模型名下，之后的用量记在新模型名下，互不混算。"""
+    admin_id = (await admin_client.get("/api/auth/me")).json()["id"]
+    async with session_scope() as db:
+        (await db.get(User, admin_id)).llm_token_encrypted = encrypt_secret("sk-batch")
+    job_id = await _job(admin_id, status=JobStatus.paused, prompt_tokens=40, completion_tokens=4)
+    # 换模型前已经切出并扣过一笔
+    await _set(job_id, prompt_tokens=30, completion_tokens=3)
+    await billing.cut_job(job_id)
+    await _set(job_id, prompt_tokens=40, completion_tokens=4)
+
+    resp = await admin_client.post(f"/api/jobs/{job_id}/model", json={
+        "model_source": "personal", "personal_model": "gw-other",
+    })
+    assert resp.status_code == 200, resp.text
+    job = await _get(job_id)
+    assert job.billing_enabled and job.personal_model_name == "gw-other"
+    assert (job.billed_prompt_tokens, job.billed_completion_tokens) == (40, 4)
+
+    # 换模型之后的用量
+    await _set(job_id, prompt_tokens=100, completion_tokens=10)
+    await billing.cut_job(job_id)
+    await billing.settle_job(job_id)
+
+    records = await _records(job_id)
+    assert [(r.model_name, r.prompt_tokens, r.completion_tokens) for r in records] == [
+        ("gw-m", 30, 3), ("gw-m", 10, 1), ("gw-other", 60, 6),
+    ]
+    assert all(r.status == BillingStatus.succeeded for r in records)
+    assert {c["model_name"] for c in gw.calls} == {"gw-m", "gw-other"}
+
+    async with session_scope() as db:
+        (await db.get(User, admin_id)).llm_token_encrypted = None
+        await db.delete(await db.get(Job, job_id))
