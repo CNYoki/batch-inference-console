@@ -27,6 +27,9 @@ Browser ──► API (FastAPI) ──► MySQL / PostgreSQL   (metadata, state)
 - **Switch models mid-job**: a paused, canceled or failed job can be moved to another model;
   resuming sends only the remaining items to the new one
 - Retry just the failed items without re-running the successful ones
+- **Projects**: group your jobs and saved prompts into projects; pick a project when creating a
+  job, filter the job list and "My Prompts" by project, move jobs between projects one at a time
+  or in bulk. Deleting a project keeps its jobs and prompts — they just become unassigned
 - **Dry run on submit**: the first line is sent for real before the job is queued, so a wrong
   model name, an expired key or a reasoning field the gateway rejects surfaces in seconds
   instead of after the whole batch has waited in line
@@ -52,6 +55,12 @@ Browser ──► API (FastAPI) ──► MySQL / PostgreSQL   (metadata, state)
 - Retention policy that clears files of finished jobs while keeping records and usage stats
 - Email notifications on completion and abnormal termination, with editable templates
 - Dashboard: queue depth, worker health, per-user token and storage usage, audit log
+- **Queue management** (admin): reorder queued jobs by drag-and-drop or move-to-top/bottom buttons
+- **Pinned jobs** (admin): a pinned job jumps to the head of the queue and takes over its model —
+  other jobs running on the same model are checkpointed and sent back to the queue (keeping their
+  original order), and nothing else runs on that model until the pinned job succeeds, fails or is
+  canceled. Already-finished items are never re-sent. A paused pinned job releases the model and
+  re-takes it on resume
 
 **Tools**
 - Script generator: describe your local CSV / JSONL / Parquet data in the UI and download a

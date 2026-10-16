@@ -17,7 +17,9 @@ import uuid
 
 from ..config import settings
 from ..db import engine, session_scope
+from ..models import JobStatus
 from ..services.model_limits import job_limit_for, job_model_names
+from ..services.pins import pinned_models, requeue_preempted
 from ..services.queue import CLAIM_BLOCKED, CLAIM_OK, queue
 from ..services.retention import sweep
 from ..services.settings_store import read_runtime
@@ -114,8 +116,10 @@ class Worker:
 
         所属模型同时在跑的任务数已到上限的先跳过、往后找，
         免得一个被限流的模型把整条队列堵死。
+        模型被置顶任务占着的，只领置顶任务本身。
         """
         rules: list[dict] | None = None
+        pins: dict[str, set[str]] = {}
         blocked: set[str] = set()
         for offset in range(0, CLAIM_SCAN_MAX, CLAIM_PAGE):
             candidates = await queue.peek(offset, CLAIM_PAGE)
@@ -124,10 +128,13 @@ class Worker:
             async with session_scope() as db:
                 if rules is None:
                     rules = (await read_runtime(db)).get("model_job_limits") or []
+                    pins = await pinned_models(db)
                 models = await job_model_names(db, candidates)
             for job_id in candidates:
                 model = models.get(job_id, "")
                 if model in blocked:
+                    continue
+                if model in pins and job_id not in pins[model]:
                     continue
                 result = await queue.claim_job(job_id, self.id, model, job_limit_for(model, rules))
                 if result == CLAIM_OK:
@@ -137,8 +144,9 @@ class Worker:
         return None
 
     async def _run_job(self, job_id: str) -> None:
+        status: JobStatus | None = None
         try:
-            await JobRunner(job_id, self.id).run()
+            status = await JobRunner(job_id, self.id).run()
         except Exception:
             log.exception("任务 %s 执行失败", job_id)
         finally:
@@ -147,6 +155,15 @@ class Worker:
                 await queue.release(job_id)
             except Exception as exc:  # noqa: BLE001
                 log.warning("释放任务 %s 租约失败: %s", job_id, exc)
+        if status == JobStatus.queued:
+            # 让给了置顶任务。必须在释放租约之后再入队：
+            # 先入队的话别的 worker 可能立刻领走，再被这边的释放把租约删掉
+            try:
+                async with session_scope() as db:
+                    await requeue_preempted(db, queue, job_id)
+            except Exception:
+                # 入队失败时任务在库里是 queued、却不在队列里；管理员在队列页能看到并处理
+                log.exception("任务 %s 放回队列失败", job_id)
 
     async def _wait_any(self, timeout: float) -> None:
         if not self.running:
