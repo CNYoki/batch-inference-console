@@ -832,6 +832,7 @@ class SystemSettingsOut(BaseModel):
     user_gateway_inference_key_passthrough: bool = False
     user_gateway_billing_key_passthrough: bool = False
     user_gateway_billing_only_matched: bool = False
+    user_gateway_passthrough_marker: dict[str, Any] = Field(default_factory=dict)
 
     # ---- 单模型同时运行的任务数上限 ----
     model_job_limits: list[ModelJobLimit] = Field(default_factory=list)
@@ -910,6 +911,7 @@ class SystemSettingsUpdate(BaseModel):
     user_gateway_inference_key_passthrough: bool | None = None
     user_gateway_billing_key_passthrough: bool | None = None
     user_gateway_billing_only_matched: bool | None = None
+    user_gateway_passthrough_marker: dict[str, Any] | None = None
 
     file_retention_days: int | None = Field(default=None, ge=0, le=3650)
     purge_input_files: bool | None = None

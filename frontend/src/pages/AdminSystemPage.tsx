@@ -86,6 +86,7 @@ export default function AdminSystemPage() {
         user_gateway_inference_api_key: '',
         user_gateway_billing_token: '',
         user_gateway_reasoning_payload: JSON.stringify(s.user_gateway_reasoning_payload ?? {}, null, 2),
+        user_gateway_passthrough_marker: JSON.stringify(s.user_gateway_passthrough_marker ?? {}, null, 2),
         user_gateway_reasoning_preset: matchPreset(
           s.user_gateway_reasoning_payload, s.user_gateway_reasoning_effort_options,
         ),
@@ -159,6 +160,8 @@ export default function AdminSystemPage() {
           ? { user_gateway_billing_url: values.user_gateway_billing_url } : {}),
         ...(values.user_gateway_billing_interval !== undefined
           ? { user_gateway_billing_interval: values.user_gateway_billing_interval } : {}),
+        ...(values.user_gateway_passthrough_marker !== undefined
+          ? { user_gateway_passthrough_marker: parseJson(values.user_gateway_passthrough_marker) } : {}),
         ...Object.fromEntries([
           'user_gateway_billing_require_batch_key', 'user_gateway_billing_only_matched',
           'user_gateway_inference_key_passthrough', 'user_gateway_billing_key_passthrough',
@@ -226,6 +229,7 @@ export default function AdminSystemPage() {
         user_gateway_inference_api_key: '',
         user_gateway_billing_token: '',
         user_gateway_reasoning_payload: JSON.stringify(s.user_gateway_reasoning_payload ?? {}, null, 2),
+        user_gateway_passthrough_marker: JSON.stringify(s.user_gateway_passthrough_marker ?? {}, null, 2),
         user_gateway_reasoning_preset: matchPreset(
           s.user_gateway_reasoning_payload, s.user_gateway_reasoning_effort_options,
         ),
@@ -240,7 +244,7 @@ export default function AdminSystemPage() {
       message.success('设置已保存')
     } catch (err) {
       if (err instanceof SyntaxError) {
-        message.error('推理请求体不是合法 JSON，请检查默认配置与下面的模型规则')
+        message.error('JSON 不合法，请检查推理请求参数、分模型配置和 batch 标识')
       }
       // 其余错误由拦截器提示
     } finally {
@@ -518,6 +522,12 @@ export default function AdminSystemPage() {
                   )}
                 </Col>
               </Row>
+              {(inferencePassthrough || rules?.some((r) => r?.billing_override && r?.inference_key_passthrough)) && (
+                <Form.Item name="user_gateway_passthrough_marker" label="透传用户 Key 时附加的 batch 标识"
+                  extra="推理接口透传用户 Key 时合进每个推理请求的请求体，网关凭它识别批量平台的请求并放行 batch Key；用户数据里的同名字段会被覆盖">
+                  <Input.TextArea rows={2} className="mono" style={{ maxWidth: 420 }} placeholder='{"batch": true}' />
+                </Form.Item>
+              )}
               <Space size={24} align="start" wrap>
                 <Form.Item name="user_gateway_billing_require_batch_key" label="限制API key添加"
                   valuePropName="checked"

@@ -55,7 +55,9 @@ Browser ──► API (FastAPI) ──► MySQL / PostgreSQL   (metadata, state)
   Key, …) pauses the job; resuming re-sends the unpaid records first. Admins see every record
   under **Billing records** and can test both endpoints from the settings page. The pre-submit
   dry run is billed too, and the job is not submitted if that charge fails. Both the inference
-  and billing endpoints can pass the user's own Key through instead of a platform key. An
+  and billing endpoints can pass the user's own Key through instead of a platform key (inference
+  requests then carry a configurable marker, `{"batch": true}` by default, so the gateway can
+  recognise them and accept the batch Key). An
   optional "restrict API key" switch rejects newly added Keys that aren't in the `batch` group —
   judged by `group` from `/api/usage/token/` when present, otherwise by a 0-amount billing call.
   Another switch bills only the models matched by a per-model config with billing routing on;

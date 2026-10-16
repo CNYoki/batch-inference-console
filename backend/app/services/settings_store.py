@@ -60,6 +60,8 @@ DEFAULTS: dict = {
     # 推理 / 计费接口的 API Key 透传用户自己的 Key（接口本身认用户 Key 时用），此时不用填平台的 Key
     "user_gateway_inference_key_passthrough": False,
     "user_gateway_billing_key_passthrough": False,
+    # 推理接口透传用户 Key 时合进请求体的标识，让网关认出这是批量平台发来的请求、放行 batch Key
+    "user_gateway_passthrough_marker": {"batch": True},
     # 仅单独配置的模型计费：只有命中打开了「模型独立计费」的分模型配置的模型才调计费接口，
     # 其余模型照常走全局推理接口、不计费
     "user_gateway_billing_only_matched": False,

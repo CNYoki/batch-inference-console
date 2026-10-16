@@ -851,3 +851,33 @@ async def test_runner_bills_with_passthrough_key(gw, billing_runtime, bill_user,
     assert await JobRunner(job_id, "w-test").run() == JobStatus.succeeded
     [record] = await _records(job_id)
     assert record.status == BillingStatus.succeeded and gw.calls[-1]["key"] == "sk-batch"
+
+
+
+def test_passthrough_requests_carry_batch_marker():
+    from app.services.inference import build_request_body
+
+    runtime = {**DEFAULTS, **BILLING_RUNTIME, "user_gateway_inference_key_passthrough": True}
+    mc = build_personal_config("gw-m", "sk-user", runtime)
+    body = build_request_body(mc, {"messages": [], "batch": False}, {}, None)
+    # 默认标识 {"batch": true}，用户数据里的同名字段盖不掉
+    assert body["batch"] is True
+
+    custom = {**runtime, "user_gateway_passthrough_marker": {"x_source": "batch", "batch": True}}
+    body = build_request_body(build_personal_config("gw-m", "sk-user", custom), {"messages": []}, {}, None)
+    assert body["x_source"] == "batch" and body["batch"] is True
+
+    # 用平台 Key 时不带
+    platform = {**runtime, "user_gateway_inference_key_passthrough": False,
+                "user_gateway_inference_api_key_encrypted": encrypt_secret("platform-key")}
+    assert "batch" not in build_request_body(build_personal_config("gw-m", "sk-user", platform), {"messages": []}, {}, None)
+
+    # 分模型配置：单独设了 Key 的不带，单独透传的带
+    own_key = _route_runtime(billing_override=True, inference_api_key_encrypted=encrypt_secret("model-key"))
+    own_key["user_gateway_inference_key_passthrough"] = True
+    assert "batch" not in build_request_body(build_personal_config("gw-m", "sk", own_key), {"messages": []}, {}, None)
+    rule_pt = _route_runtime(billing_override=True, inference_key_passthrough=True)
+    assert build_request_body(build_personal_config("gw-m", "sk", rule_pt), {"messages": []}, {}, None)["batch"] is True
+    # 直连模式（没开独立计费）不带
+    direct = {**DEFAULTS, "user_gateway_base_url": "http://gw.test/v1"}
+    assert "batch" not in build_request_body(build_personal_config("gw-m", "sk", direct), {"messages": []}, {}, None)

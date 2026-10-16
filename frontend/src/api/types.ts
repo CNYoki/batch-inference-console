@@ -276,6 +276,8 @@ export interface SystemSettings {
   user_gateway_billing_key_passthrough: boolean
   /** 只有命中「模型独立计费」的模型才调计费接口 */
   user_gateway_billing_only_matched: boolean
+  /** 推理接口透传用户 Key 时合进请求体的 batch 标识 */
+  user_gateway_passthrough_marker: Record<string, unknown>
 
   model_job_limits: ModelJobLimit[]
 

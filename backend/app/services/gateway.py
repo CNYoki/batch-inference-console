@@ -394,6 +394,19 @@ def resolve_reasoning(model_name: str, runtime: dict) -> dict:
     return default
 
 
+def uses_key_passthrough(model_name: str, runtime: dict) -> bool:
+    """这个模型的推理请求是不是透传用户 Key（与 resolve_route 的取 Key 逻辑一致）。"""
+    if not billing_mode(runtime):
+        return False
+    rule = match_rule(model_name, runtime)
+    if rule and rule.get("billing_override"):
+        if rule.get("inference_key_passthrough"):
+            return True
+        if decrypt_secret(rule.get("inference_api_key_encrypted") or ""):
+            return False
+    return bool(runtime.get("user_gateway_inference_key_passthrough"))
+
+
 def build_personal_config(model_name: str, token: str, runtime: dict) -> ModelConfig:
     """为个人 token 任务拼一个「虚拟」模型配置。
 
@@ -406,7 +419,7 @@ def build_personal_config(model_name: str, token: str, runtime: dict) -> ModelCo
     # 独立计费时推理用平台的 Key（可按模型单独指定接口和重定向模型名），用户的 token 只拿来扣费。
     # display_name 是用户看到的名字，model_name 是真正发给推理接口的名字
     base_url, api_key, upstream = resolve_route(model_name, runtime, token)
-    return ModelConfig(
+    mc = ModelConfig(
         name=f"__personal__:{model_name}",
         display_name=model_name,
         base_url=base_url,
@@ -439,4 +452,8 @@ def build_personal_config(model_name: str, token: str, runtime: dict) -> ModelCo
         max_tokens_cap=int(runtime.get("user_gateway_max_tokens_cap") or 0),
         sort_order=0,
     )
+    if uses_key_passthrough(model_name, runtime):
+        # 透传用户 Key 时带上 batch 标识，网关据此认出是批量平台的请求（见 build_request_body）
+        mc.body_marker = dict(runtime.get("user_gateway_passthrough_marker") or {})
+    return mc
 
