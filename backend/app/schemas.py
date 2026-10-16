@@ -829,6 +829,7 @@ class SystemSettingsOut(BaseModel):
     user_gateway_billing_token_masked: str | None = None
     user_gateway_billing_interval: int = 60
     user_gateway_billing_require_batch_key: bool = False
+    user_gateway_key_check_model: str = ""
     user_gateway_inference_key_passthrough: bool = False
     user_gateway_billing_key_passthrough: bool = False
     user_gateway_billing_only_matched: bool = False
@@ -908,6 +909,7 @@ class SystemSettingsUpdate(BaseModel):
     user_gateway_billing_token: str | None = Field(default=None, max_length=1024)
     user_gateway_billing_interval: int | None = Field(default=None, ge=10, le=3600)
     user_gateway_billing_require_batch_key: bool | None = None
+    user_gateway_key_check_model: str | None = Field(default=None, max_length=255)
     user_gateway_inference_key_passthrough: bool | None = None
     user_gateway_billing_key_passthrough: bool | None = None
     user_gateway_billing_only_matched: bool | None = None

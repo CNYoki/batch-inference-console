@@ -351,6 +351,7 @@ async def send_record(record_id: int, *, include_failed: bool = False) -> Billin
 # --------------------------------------------------------------------------- #
 # 这些错误说明 Key 本身不能用于批量计费
 _KEY_REJECT_CODES = {"invalid_key", "key_unavailable", "key_not_batch", "user_disabled", "batch_group_unavailable"}
+# 没配「校验用模型」时的缺省模型名
 KEY_CHECK_MODEL = "batch-key-check"
 
 
@@ -373,7 +374,7 @@ async def verify_batch_key(runtime: dict, key: str, info: KeyInfo | None) -> Non
     payload = {
         "key": key,
         "request_id": f"{REQUEST_PREFIX}-keycheck-{uuid.uuid4().hex}",
-        "model_name": KEY_CHECK_MODEL,
+        "model_name": (runtime.get("user_gateway_key_check_model") or "").strip() or KEY_CHECK_MODEL,
         "amount": "0",
         "note": "批量推理平台校验 Key 分组（0 元，不扣费）",
     }

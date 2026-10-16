@@ -767,6 +767,13 @@ async def test_require_batch_key_rejects_other_groups(admin_client: AsyncClient,
     assert resp.status_code == 200, resp.text
     probe = gw.calls[calls_before]
     assert probe["amount"] == "0" and probe["request_id"].startswith("bic-keycheck-")
+    assert probe["model_name"] == "batch-key-check"
+    # 配了校验用模型就用它
+    async with session_scope() as db:
+        await write_runtime(db, {"user_gateway_key_check_model": " gw-m "})
+    calls_before = len(gw.calls)
+    resp = await admin_client.post("/api/models/personal", json={"token": "sk-nogroup", "remember": False})
+    assert resp.status_code == 200 and gw.calls[calls_before]["model_name"] == "gw-m"
     resp = await admin_client.post("/api/models/personal", json={"token": "sk-nogroup-plain", "remember": True})
     assert resp.status_code == 400 and "batch 分组" in resp.json()["detail"]
     # 被拒的 Key 不会保存下来
