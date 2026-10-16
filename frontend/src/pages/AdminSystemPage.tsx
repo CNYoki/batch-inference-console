@@ -64,6 +64,7 @@ export default function AdminSystemPage() {
   const billingOn = Form.useWatch('user_gateway_billing_enabled', form) as boolean | undefined
   const inferencePassthrough = Form.useWatch('user_gateway_inference_key_passthrough', form) as boolean | undefined
   const billingPassthrough = Form.useWatch('user_gateway_billing_key_passthrough', form) as boolean | undefined
+  const requireBatchKey = Form.useWatch('user_gateway_billing_require_batch_key', form) as boolean | undefined
 
   const load = useCallback(async () => {
     const [d, u] = await Promise.all([
@@ -164,6 +165,7 @@ export default function AdminSystemPage() {
           ? { user_gateway_passthrough_marker: parseJson(values.user_gateway_passthrough_marker) } : {}),
         ...Object.fromEntries([
           'user_gateway_billing_require_batch_key', 'user_gateway_billing_only_matched',
+          'user_gateway_key_check_model',
           'user_gateway_inference_key_passthrough', 'user_gateway_billing_key_passthrough',
         ].filter((k) => values[k] !== undefined).map((k) => [k, values[k]])),
         // 密钥只在真的输入了新值时才提交，留空 = 保持原值
@@ -534,6 +536,12 @@ export default function AdminSystemPage() {
                   extra="打开后用户新添加的 Key 必须属于 batch 分组，否则直接拒绝（网关不返回分组时发一笔 0 元计费来判断）">
                   <Switch />
                 </Form.Item>
+                {requireBatchKey && (
+                  <Form.Item name="user_gateway_key_check_model" label="校验请求模型"
+                    extra="0 元计费试探时带的模型名，填网关里存在的模型；留空用 batch-key-check">
+                    <Input className="mono" placeholder="batch-key-check" style={{ width: 220 }} />
+                  </Form.Item>
+                )}
                 <Form.Item name="user_gateway_billing_only_matched" label="仅单独配置的模型计费"
                   valuePropName="checked"
                   extra="打开后只有命中「分模型配置」里打开了「模型独立计费」的模型才调计费接口，其余模型照常推理、不计费">

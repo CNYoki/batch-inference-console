@@ -271,6 +271,8 @@ export interface SystemSettings {
   user_gateway_billing_interval: number
   /** 限制 API Key 添加：只接受 batch 分组的 Key */
   user_gateway_billing_require_batch_key: boolean
+  /** 0 元计费校验 Key 分组时用的模型名；空 = batch-key-check */
+  user_gateway_key_check_model: string
   /** 推理 / 计费接口的 API Key 透传用户自己的 Key */
   user_gateway_inference_key_passthrough: boolean
   user_gateway_billing_key_passthrough: boolean
