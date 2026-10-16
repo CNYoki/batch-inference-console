@@ -16,6 +16,7 @@ import JobStatusTag from '../components/JobStatusTag'
 import MoveToProjectModal from '../components/MoveToProjectModal'
 import { useAuth } from '../hooks/useAuth'
 import { usePolling } from '../hooks/usePolling'
+import { JobBillingPanel } from '../components/BillingRecords'
 import { ACTIVE_STATUSES, formatBytes, formatDateTime, formatDuration, formatNumber } from '../utils'
 
 export default function JobDetailPage() {
@@ -274,6 +275,11 @@ export default function JobDetailPage() {
                 : <Table rowKey="item_index" size="small" columns={errorColumns} dataSource={errors}
                     pagination={{ pageSize: 20 }} />,
             },
+            ...(job.billing_enabled ? [{
+              key: 'billing',
+              label: '计费',
+              children: <JobBillingPanel job={job} onChanged={() => void loadJob()} />,
+            }] : []),
             {
               key: 'info',
               label: '任务信息',
@@ -285,7 +291,7 @@ export default function JobDetailPage() {
                   <Descriptions.Item label="模型">
                     <Space size={4}>
                       <Tag color={job.model_source === 'shared' ? 'blue' : 'default'}>
-                        {job.model_source === 'shared' ? '公用' : '个人 token'}
+                        {job.model_source === 'shared' ? '公用' : job.billing_enabled ? '个人网关 · 独立计费' : '个人 token'}
                       </Tag>
                       <span className={job.model_source === 'personal' ? 'mono' : undefined}>
                         {job.model_display_name ?? '—'}

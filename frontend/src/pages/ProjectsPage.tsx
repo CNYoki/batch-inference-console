@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { App, Button, Card, Form, Input, Modal, Space, Table, Tag, Typography } from 'antd'
+import { App, Button, Card, Form, Input, Modal, Space, Table, Tag, Tooltip, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import {
   DatabaseOutlined, DeleteOutlined, EditOutlined, MessageOutlined, PlusOutlined,
@@ -63,7 +63,10 @@ export default function ProjectsPage() {
       title: '项目', width: 260,
       render: (_, r) => (
         <Space direction="vertical" size={0}>
-          <a onClick={() => navigate(`/jobs?project=${r.id}`)}><Typography.Text strong>{r.name}</Typography.Text></a>
+          <Space size={6}>
+            <a onClick={() => navigate(`/jobs?project=${r.id}`)}><Typography.Text strong>{r.name}</Typography.Text></a>
+            {r.is_default && <Tag color="blue">默认</Tag>}
+          </Space>
           {r.description && (
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>{r.description}</Typography.Text>
           )}
@@ -93,12 +96,18 @@ export default function ProjectsPage() {
           <Button size="small" type="primary" ghost icon={<PlusOutlined />}
             onClick={() => navigate(`/jobs/new?project=${r.id}`)}>在此项目新建任务</Button>
           <Button size="small" icon={<EditOutlined />} onClick={() => openModal(r)}>编辑</Button>
-          <Button size="small" danger icon={<DeleteOutlined />} onClick={() => modal.confirm({
-            title: `删除项目「${r.name}」？`,
-            content: '项目里的任务和 Prompt 不会被删除，只是回到「未归类」。',
-            okText: '删除', okButtonProps: { danger: true }, cancelText: '取消',
-            onOk: async () => { await api.deleteProject(r.id); message.success('已删除'); await load() },
-          })} />
+          {r.is_default ? (
+            <Tooltip title="默认项目不能删除">
+              <Button size="small" danger icon={<DeleteOutlined />} disabled />
+            </Tooltip>
+          ) : (
+            <Button size="small" danger icon={<DeleteOutlined />} onClick={() => modal.confirm({
+              title: `删除项目「${r.name}」？`,
+              content: '项目里的任务不会被删除，会挪回默认项目；其中的 Prompt 变成「未归类」。',
+              okText: '删除', okButtonProps: { danger: true }, cancelText: '取消',
+              onOk: async () => { await api.deleteProject(r.id); message.success('已删除'); await load() },
+            })} />
+          )}
         </Space>
       ),
     },
@@ -111,7 +120,8 @@ export default function ProjectsPage() {
     >
       <Typography.Paragraph type="secondary">
         用项目把同一件事的任务和 Prompt 归到一起，方便在 <DatabaseOutlined /> 任务列表和{' '}
-        <MessageOutlined /> 我的 Prompt 里按项目筛选。项目只对你自己可见，删除项目不会删除其中的内容。
+        <MessageOutlined /> 我的 Prompt 里按项目筛选。每个任务都属于一个项目，没有指定的放进默认项目。
+        项目只对你自己可见，删除项目不会删除其中的内容。
       </Typography.Paragraph>
       <Table rowKey="id" loading={loading} columns={columns} dataSource={rows} scroll={{ x: 1000 }}
         pagination={rows.length > 20 ? { pageSize: 20 } : false}
@@ -125,7 +135,7 @@ export default function ProjectsPage() {
         <Form form={form} layout="vertical">
           <Form.Item name="name" label="名称"
             rules={[{ required: true, whitespace: true, message: '请填写项目名称' }]}>
-            <Input maxLength={128} placeholder="例：客服对话质检" />
+            <Input maxLength={128} placeholder="例：某科研任务" />
           </Form.Item>
           <Form.Item name="description" label="说明（可选）">
             <Input.TextArea maxLength={1024} rows={3} placeholder="这个项目做什么" />

@@ -25,6 +25,8 @@ from ..models import (
     PIN_BLOCKING_STATUSES,
     TERMINAL_STATUSES,
     AuditLog,
+    BillingRecord,
+    BillingStatus,
     Job,
     JobError,
     JobStatus,
@@ -37,6 +39,7 @@ from ..models import (
 from ..schemas import (
     JobBatchProject,
     JobBatchProjectOut,
+    JobBillingOut,
     JobCreate,
     JobDryRun,
     JobDryRunOut,
@@ -52,11 +55,13 @@ from ..schemas import (
     QueueReorder,
     UploadValidateOut,
 )
+from ..services import billing
 from ..services import jsonl as jsonl_svc
 from ..services import results as results_svc
-from ..services.gateway import GatewayError, build_personal_config, fetch_models
+from ..services.gateway import GatewayError, billing_mode, build_personal_config, list_user_models
 from ..services.inference import InferenceClient, build_request_body, resolve_params
 from ..services.pins import as_timestamp, enqueue_job, preempt_for
+from ..services.projects import ensure_default_project
 from ..services.queue import queue
 from ..services.settings_store import read_runtime
 from ..services.storage import QUOTA_MESSAGE, check_before_upload
@@ -92,10 +97,13 @@ async def _get_job_or_404(db: DB, user: User, job_id: str) -> Job:
     return job
 
 
-async def _check_project(db: DB, owner_id: str, project_id: str | None) -> str | None:
-    """项目只能是任务提交者本人的；管理员替别人归类也只能挪进对方自己的项目。"""
+async def _check_project(db: DB, owner_id: str, project_id: str | None) -> str:
+    """项目只能是任务提交者本人的；管理员替别人归类也只能挪进对方自己的项目。
+
+    任务总要归属某个项目：没指定（命令行等老客户端不传）就放进提交者的默认项目。
+    """
     if not project_id:
-        return None
+        return (await ensure_default_project(db, owner_id)).id
     project = await db.get(Project, project_id)
     if project is None or project.user_id != owner_id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "项目不存在")
@@ -141,6 +149,8 @@ def _to_out(job: Job, queue_position: int | None = None, live: dict[str, str] | 
         queue_position=queue_position,
         prompt_tokens=job.prompt_tokens,
         completion_tokens=job.completion_tokens,
+        cached_tokens=job.cached_tokens,
+        billing_enabled=job.billing_enabled,
         concurrency=job.concurrency,
         params=job.params or {},
         error=job.error,
@@ -289,6 +299,8 @@ async def create_job(payload: JobCreate, user: CurrentUser, db: DB) -> JobOut:
         input_size=final_path.stat().st_size,
         total_items=validation.total,
         queued_at=datetime.now(UTC),
+        # 只是先标上给前端看；worker 每次开跑时会按当时的设置再定一次
+        billing_enabled=personal and runtime.user_gateway_billing_enabled,
     )
     db.add(job)
     await db.commit()
@@ -346,9 +358,33 @@ async def dry_run(payload: JobDryRun, user: CurrentUser, db: DB) -> JobDryRunOut
     except Exception as exc:  # noqa: BLE001 — 建客户端就失败（密钥解密等），原因照样回显
         out = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
+    note = None
+    if payload.model_source == ModelSource.personal.value and out.get("ok"):
+        note = await _bill_dry_run(db, user, payload, out.get("usage") or {})
+
     return JobDryRunOut(
-        custom_id=item.custom_id, item_index=payload.item_index, request_body=body, **out,
+        custom_id=item.custom_id, item_index=payload.item_index, request_body=body, billing=note, **out,
     )
+
+
+async def _bill_dry_run(db: DB, user: User, payload: JobDryRun, usage: dict) -> str | None:
+    """独立计费时，试跑那一条用的是平台的推理 Key，也要向用户扣费。"""
+    if not billing_mode(await read_runtime(db)):
+        return None
+    record = billing.record_for_try(user, payload.personal_model or "", usage)
+    if record is None:
+        return "网关没有返回用量，本次试跑未计费"
+    if payload.personal_token:
+        record.key_encrypted = encrypt_secret(payload.personal_token)
+    db.add(record)
+    await db.commit()
+
+    sent = await billing.send_record(record.id)
+    if sent is None or sent.status == BillingStatus.pending:
+        return "计费接口暂时不可用，稍后会自动补扣"
+    if sent.status == BillingStatus.failed:
+        return "试跑计费失败：" + billing.describe(sent.error_code, sent.error, sent.model_name)
+    return f"已按用量扣费（{sent.prompt_tokens} 输入 + {sent.completion_tokens} 输出 tokens）"
 
 
 async def _resolve_shared_model(payload: ModelSelection, user: User, db: DB) -> ModelConfig:
@@ -366,21 +402,25 @@ async def _resolve_personal_model(payload: ModelSelection, user: User, db: DB) -
     if not runtime["user_gateway_enabled"]:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "管理员未开启个人网关")
 
+    billed = billing_mode(runtime)
     token = payload.personal_token or decrypt_secret(user.llm_token_encrypted)
     if not token:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "请先填写你的网关 token")
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "请先填写你的 batch 分组 Key" if billed else "请先填写你的网关 token",
+        )
 
     # 提交时再校验一次权限：token 可能已被网关回收，或模型权限被调整。
     # 早失败好过让任务排到队列里再整批报错。
     try:
-        allowed = await fetch_models(runtime["user_gateway_base_url"], token)
+        allowed, _ = await list_user_models(runtime, token)
     except GatewayError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.message) from exc
 
     if payload.personal_model not in allowed:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            f"你的 token 没有模型 {payload.personal_model} 的权限，请重新选择",
+            f"你的 Key 不能使用模型 {payload.personal_model}，请重新选择"
+            if billed else f"你的 token 没有模型 {payload.personal_model} 的权限，请重新选择",
         )
 
     if payload.personal_token and payload.remember_token:
@@ -717,7 +757,7 @@ async def download_input(job_id: str, user: CurrentUser, db: DB) -> StreamingRes
 async def patch_job(job_id: str, payload: JobPatch, user: CurrentUser, db: DB) -> JobOut:
     job = await _get_job_or_404(db, user, job_id)
     data = payload.model_dump(exclude_unset=True, exclude_none=True)
-    # project_id 显式传 null 表示移出项目，不能跟着 exclude_none 一起丢掉
+    # project_id 显式传 null 表示挪回默认项目，不能跟着 exclude_none 一起丢掉
     if "project_id" in payload.model_fields_set:
         data["project_id"] = await _check_project(db, job.user_id, payload.project_id)
 
@@ -739,7 +779,7 @@ async def patch_job(job_id: str, payload: JobPatch, user: CurrentUser, db: DB) -
 
 @router.post("/batch-project", response_model=JobBatchProjectOut)
 async def move_jobs_to_project(payload: JobBatchProject, user: CurrentUser, db: DB) -> JobBatchProjectOut:
-    """把自己的一批任务挪进某个项目；project_id 为空表示移出项目。"""
+    """把自己的一批任务挪进某个项目；project_id 为空表示挪回默认项目。"""
     project_id = await _check_project(db, user.id, payload.project_id)
     jobs = (
         await db.execute(select(Job).where(Job.id.in_(payload.job_ids), Job.user_id == user.id))
@@ -925,6 +965,10 @@ async def change_model(job_id: str, payload: JobModelChange, user: CurrentUser, 
     else:
         mc = await _resolve_shared_model(payload, user, db)
 
+    # 换模型前把旧模型的用量结成一笔，计费起点挪到当前用量
+    await billing.cut_before_change(
+        db, job, personal and billing_mode(await read_runtime(db)),
+    )
     job.model_source = ModelSource.personal if personal else ModelSource.shared
     job.model_config_id = None if personal else mc.id
     job.personal_model_name = payload.personal_model if personal else None
@@ -977,8 +1021,57 @@ async def delete_job(job_id: str, user: CurrentUser, db: DB) -> None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "请先取消任务再删除")
 
     input_path = job.input_path
+    if job.billing_enabled:
+        # 任务删了，没切出来的用量也要先记下来，计费记录不随任务删除
+        await billing.cut(db, job.id)
+        job = await _get_job_or_404(db, user, job_id)
     await db.delete(job)
     await db.commit()
     await queue.remove(job_id)
     await queue.clear_signal(job_id)
     results_svc.delete_job_files(job_id, input_path)
+
+
+# --------------------------------------------------------------------------- #
+# 个人网关计费
+# --------------------------------------------------------------------------- #
+async def _billing_out(db: DB, job: Job, message: str | None = None) -> JobBillingOut:
+    from .billing import record_out
+
+    summary = await billing.job_summary(db, job)
+    rows = (
+        await db.execute(
+            select(BillingRecord)
+            .where(BillingRecord.job_id == job.id)
+            .order_by(BillingRecord.id.desc())
+            .limit(50)
+        )
+    ).scalars().all()
+    return JobBillingOut(**summary, records=[record_out(r) for r in rows], message=message)
+
+
+@router.get("/{job_id}/billing", response_model=JobBillingOut)
+async def job_billing(job_id: str, user: CurrentUser, db: DB) -> JobBillingOut:
+    job = await _get_job_or_404(db, user, job_id)
+    return await _billing_out(db, job)
+
+
+@router.post("/{job_id}/billing/retry", response_model=JobBillingOut)
+async def retry_job_billing(job_id: str, user: CurrentUser, db: DB) -> JobBillingOut:
+    """立即重发这个任务没扣上的计费记录（比如充值之后）。同一个 request_id 不会重复扣。"""
+    job = await _get_job_or_404(db, user, job_id)
+    owner = await db.get(User, job.user_id)
+    if owner is not None:
+        await billing.rekey_failed(db, job.id, owner)
+    if job.status != JobStatus.running:
+        await billing.cut(db, job.id)
+    result = await billing.settle_job(job.id, include_failed=True)
+    if result.problem:
+        message = result.problem
+    elif result.sent:
+        message = f"已重发 {result.sent} 笔"
+    else:
+        message = "没有需要重发的计费记录"
+    job = await _get_job_or_404(db, user, job_id)
+    await db.refresh(job)
+    return await _billing_out(db, job, message)

@@ -12,7 +12,7 @@ type Props = {
   onMoved: () => void
 }
 
-/** 把任务挪进某个项目，或移出项目。 */
+/** 把任务挪进某个项目。任务总要属于一个项目，所以不能清空。 */
 export default function MoveToProjectModal({ jobIds, current, onClose, onMoved }: Props) {
   const { message } = App.useApp()
   const [target, setTarget] = useState<string | null>(null)
@@ -29,7 +29,7 @@ export default function MoveToProjectModal({ jobIds, current, onClose, onMoved }
       if (updated < jobIds.length) {
         message.warning(`只挪动了你自己的 ${updated} 个任务，其余是别人的任务`)
       }
-      message.success(target ? '已归入项目' : '已移出项目')
+      message.success('已归入项目')
       onMoved()
       onClose()
     } catch { /* 拦截器已提示 */ } finally {
@@ -44,9 +44,10 @@ export default function MoveToProjectModal({ jobIds, current, onClose, onMoved }
       okText="确定" cancelText="取消" destroyOnClose
     >
       <Typography.Paragraph type="secondary">
-        清空选择即移出项目。项目只用来归类，不影响任务的运行。
+        项目只用来归类，不影响任务的运行。
       </Typography.Paragraph>
-      <ProjectSelect style={{ width: '100%' }} value={target} onChange={setTarget} allowCreate />
+      <ProjectSelect style={{ width: '100%' }} value={target} onChange={setTarget}
+        allowCreate allowClear={false} pickDefault />
     </Modal>
   )
 }

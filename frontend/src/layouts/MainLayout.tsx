@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { Alert, Avatar, Dropdown, Layout, Menu, Tag, Typography } from 'antd'
 import {
-  ApiOutlined, CodeOutlined, ControlOutlined, DatabaseOutlined, FileTextOutlined, FolderOutlined,
+  AccountBookOutlined, ApiOutlined, CodeOutlined, ControlOutlined, DatabaseOutlined, FileTextOutlined, FolderOutlined,
   LogoutOutlined, MessageOutlined, OrderedListOutlined, PlusOutlined, SettingOutlined, TeamOutlined,
   UserOutlined,
 } from '@ant-design/icons'
@@ -49,6 +49,7 @@ export default function MainLayout() {
       { key: '/admin/models', icon: <ApiOutlined />, label: '模型配置' },
       { key: '/admin/users', icon: <TeamOutlined />, label: '用户管理' },
       { key: '/admin/queue', icon: <OrderedListOutlined />, label: '队列管理' },
+      { key: '/admin/billing', icon: <AccountBookOutlined />, label: '计费记录' },
       { key: '/admin/system', icon: <ControlOutlined />, label: '系统与队列' },
     ]
   }, [isAdmin])

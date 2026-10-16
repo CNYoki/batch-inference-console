@@ -13,8 +13,9 @@ from ..config import settings
 from ..core.security import decrypt_secret
 from ..db import session_scope
 from ..models import Job, JobError, JobStatus, ModelConfig, ModelSource, User
+from ..services import billing
 from ..services import results as results_svc
-from ..services.gateway import build_personal_config
+from ..services.gateway import billing_config_error, billing_mode, build_personal_config
 from ..services.inference import InferenceClient, InferenceError, build_request_body
 from ..services.jsonl import JsonlError, iter_items
 from ..services.notifications import notify_job
@@ -44,12 +45,18 @@ class JobRunner:
         self.failed = 0
         self.prompt_tokens = 0
         self.completion_tokens = 0
+        self.cached_tokens = 0
         self.error_samples: list[dict] = []
         self._stored_errors = 0
         self._stop_status: JobStatus | None = None
         self._last_progress_flush = 0.0
         self._last_db_flush = 0.0
         self._counter_lock = asyncio.Lock()
+        # 本次运行是否走独立计费、计费间隔；_load 时按当前设置定下来
+        self._billing = False
+        self._billing_interval = 60.0
+        # 计费失败时停下任务的原因，结束时写进任务的 error
+        self._billing_error: str | None = None
 
     # ------------------------------------------------------------------ #
     async def run(self) -> JobStatus:
@@ -88,8 +95,15 @@ class JobRunner:
         self.failed = state.failed
         self.prompt_tokens = state.prompt_tokens
         self.completion_tokens = state.completion_tokens
+        self.cached_tokens = state.cached_tokens
         if state.done_indices:
             log.info("任务 %s 断点续跑，已完成 %d 条", self.job_id, len(state.done_indices))
+
+        # 独立计费：先把以前没扣上的补扣掉，扣不上就不开跑
+        if problem := await self._prepare_billing(job):
+            log.info("任务 %s 计费未结清，暂停：%s", self.job_id, problem)
+            await self._pause_for_billing(problem)
+            return JobStatus.paused
 
         await self._mark_running()
 
@@ -97,6 +111,7 @@ class JobRunner:
         writer = results_svc.ResultWriter(self.job_id)
         stop_event = asyncio.Event()
         watcher = asyncio.create_task(self._watch_signals(stop_event))
+        biller = asyncio.create_task(self._billing_loop(stop_event)) if self._billing else None
 
         final_status: JobStatus
         try:
@@ -129,6 +144,8 @@ class JobRunner:
             return JobStatus.failed
         finally:
             watcher.cancel()
+            if biller:
+                biller.cancel()
 
         await writer.flush()
         await self._finalize(final_status)
@@ -183,6 +200,7 @@ class JobRunner:
                         completed=1,
                         prompt_tokens=result.prompt_tokens,
                         completion_tokens=result.completion_tokens,
+                        cached_tokens=result.cached_tokens,
                     )
 
         try:
@@ -206,6 +224,9 @@ class JobRunner:
 
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
+            # 条目都发出去之后才收到暂停/取消：没轮上的条目被跳过了，不能当作跑完
+            if stop_event.is_set() and self.completed + self.failed < job.total_items:
+                raise _Stop(self._stop_status or JobStatus.canceled)
         finally:
             for task in pending:
                 task.cancel()
@@ -215,13 +236,15 @@ class JobRunner:
     # ------------------------------------------------------------------ #
     async def _bump(
         self, *, completed: int = 0, failed: int = 0,
-        prompt_tokens: int = 0, completion_tokens: int = 0, error: dict | None = None,
+        prompt_tokens: int = 0, completion_tokens: int = 0, cached_tokens: int = 0,
+        error: dict | None = None,
     ) -> None:
         async with self._counter_lock:
             self.completed += completed
             self.failed += failed
             self.prompt_tokens += prompt_tokens
             self.completion_tokens += completion_tokens
+            self.cached_tokens += cached_tokens
             if error and self._stored_errors < results_svc.MAX_STORED_ERRORS:
                 self.error_samples.append(error)
                 self._stored_errors += 1
@@ -239,7 +262,7 @@ class JobRunner:
     async def _flush_db(self) -> None:
         async with self._counter_lock:
             completed, failed = self.completed, self.failed
-            ptok, ctok = self.prompt_tokens, self.completion_tokens
+            ptok, ctok, cached = self.prompt_tokens, self.completion_tokens, self.cached_tokens
             errors, self.error_samples = self.error_samples, []
 
         # 顺带把结果文件体积写回去，存储配额统计要用（两次 stat，很便宜）
@@ -252,7 +275,7 @@ class JobRunner:
                 .where(Job.id == self.job_id)
                 .values(
                     completed_items=completed, failed_items=failed,
-                    prompt_tokens=ptok, completion_tokens=ctok,
+                    prompt_tokens=ptok, completion_tokens=ctok, cached_tokens=cached,
                     result_size=result_size,
                 )
             )
@@ -286,6 +309,70 @@ class JobRunner:
                         await queue.clear_signal(self.job_id)
         except asyncio.CancelledError:
             pass
+
+    async def _billing_loop(self, stop_event: asyncio.Event) -> None:
+        """独立计费：每隔一段时间把新增用量扣一次费；扣不上就把任务停下来。"""
+        try:
+            while not stop_event.is_set():
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=self._billing_interval)
+                    return
+                except TimeoutError:
+                    pass
+                problem = await self._bill()
+                if problem and not stop_event.is_set():
+                    log.warning("任务 %s 计费失败，暂停：%s", self.job_id, problem)
+                    self._billing_error = problem
+                    self._stop_status = JobStatus.paused
+                    stop_event.set()
+        except asyncio.CancelledError:
+            pass
+
+    async def _bill(self) -> str | None:
+        """先把内存里的用量写回库，再切记录、扣费。返回需要停下任务的原因。"""
+        try:
+            await self._flush_db()
+            return (await billing.bill_job(self.job_id)).problem
+        except Exception as exc:  # noqa: BLE001 — 计费出岔子不能把任务本身搞挂，记录留着下轮重发
+            log.warning("任务 %s 计费异常: %s", self.job_id, exc)
+            return None
+
+    async def _prepare_billing(self, job: Job) -> str | None:
+        """按当前设置确定本次是否独立计费，必要时切换计费起点；再把以前没扣上的补扣掉。"""
+        async with session_scope() as db:
+            row = await db.get(Job, self.job_id)
+            if row is None:
+                return None
+            if row.billing_enabled != self._billing:
+                # 计费方式变了（管理员切了开关、任务换了模型）：旧方式下的差额先结掉，
+                # 再以断点续跑读回的用量为新起点
+                if row.billing_enabled:
+                    await billing.cut(db, self.job_id)
+                    await db.refresh(row)
+                row.prompt_tokens = self.prompt_tokens
+                row.completion_tokens = self.completion_tokens
+                row.cached_tokens = self.cached_tokens
+                billing.rebase(row, self._billing)
+                await db.commit()
+            if not self._billing:
+                return None
+            user = await db.get(User, job.user_id)
+            if user is not None:
+                await billing.rekey_failed(db, self.job_id, user)
+        try:
+            await billing.cut_job(self.job_id)
+            return (await billing.settle_job(self.job_id, include_failed=True)).problem
+        except Exception as exc:  # noqa: BLE001
+            log.warning("任务 %s 补扣计费异常: %s", self.job_id, exc)
+            return None
+
+    async def _pause_for_billing(self, problem: str) -> None:
+        async with session_scope() as db:
+            await db.execute(
+                update(Job).where(Job.id == self.job_id)
+                .values(status=JobStatus.paused, worker_id=None, error=problem[:2000])
+            )
+        await queue.clear_signal(self.job_id)
 
     async def _blocked_by_pin(self) -> bool:
         try:
@@ -325,6 +412,11 @@ class JobRunner:
                 runtime = await read_runtime(db)
                 if not runtime["user_gateway_enabled"]:
                     return job, None, "管理员已关闭个人网关"
+                if billing_mode(runtime):
+                    if problem := billing_config_error(runtime):
+                        return job, None, problem
+                    self._billing = True
+                    self._billing_interval = billing.interval_of(runtime)
                 return job, build_personal_config(job.personal_model_name, token, runtime), None
 
             mc = None
@@ -361,6 +453,8 @@ class JobRunner:
                 )
             )
         await queue.clear_signal(self.job_id)
+        if self._billing:
+            await self._bill()
         await notify_job(self.job_id)
 
     async def _finalize(self, status: JobStatus) -> None:
@@ -372,6 +466,7 @@ class JobRunner:
             "failed_items": self.failed,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
+            "cached_tokens": self.cached_tokens,
             "result_size": sizes["output_bytes"] + sizes["errors_bytes"],
         }
         if status in {JobStatus.succeeded, JobStatus.completed, JobStatus.canceled}:
@@ -380,11 +475,18 @@ class JobRunner:
             values["pinned"] = False
         if status in {JobStatus.paused, JobStatus.queued}:
             values["worker_id"] = None
+        if self._billing_error and status == JobStatus.paused:
+            values["error"] = self._billing_error[:2000]
 
         async with session_scope() as db:
             await db.execute(update(Job).where(Job.id == self.job_id).values(**values))
 
         await queue.set_progress(self.job_id, self.completed, self.failed)
+        if self._billing:
+            # 停下、跑完都立即结算一次；扣不上的记录留在库里，恢复时或由 worker 巡检补扣
+            problem = await self._bill()
+            if problem:
+                log.warning("任务 %s 结束时计费未结清：%s", self.job_id, problem)
         if status != JobStatus.queued:
             # 让出的任务由 worker 在释放租约后处理信号（见 requeue_preempted）
             await queue.clear_signal(self.job_id)

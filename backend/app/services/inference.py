@@ -44,6 +44,18 @@ class InferenceResult:
     attempts: int
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cached_tokens: int = 0
+
+
+def cached_tokens_of(usage: dict[str, Any]) -> int:
+    """命中缓存的输入 token。OpenAI 放在 prompt_tokens_details 里，DeepSeek 用 prompt_cache_hit_tokens。"""
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, dict) and details.get("cached_tokens"):
+        return int(details["cached_tokens"] or 0)
+    try:
+        return int(usage.get("prompt_cache_hit_tokens") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 class RateLimiter:
@@ -263,6 +275,7 @@ class InferenceClient:
                             attempts=attempt,
                             prompt_tokens=int(usage.get("prompt_tokens") or 0),
                             completion_tokens=int(usage.get("completion_tokens") or 0),
+                            cached_tokens=cached_tokens_of(usage),
                         )
                 else:
                     retriable = resp.status_code in RETRIABLE_STATUS

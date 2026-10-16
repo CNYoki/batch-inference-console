@@ -324,19 +324,16 @@ async def _enable_gateway(client: AsyncClient, base_url: str = "https://gw.examp
 
 
 def _fake_gateway(monkeypatch, models=("gw-model-a", "gw-model-b"), error=None):
-    """替换掉两个 api 模块里按名字导入的 fetch_models。"""
+    """替换掉网关的模型列表拉取（api 模块都经由 list_user_models 调它）。"""
+    import app.services.gateway as gw_mod
     from app.services.gateway import GatewayError
 
-    async def fake(base_url, token):
+    async def fake(base_url, token, *, platform=False):
         if error:
             raise GatewayError(error)
         return list(models)
 
-    import app.api.jobs as jobs_mod
-    import app.api.model_configs as mc_mod
-
-    monkeypatch.setattr(mc_mod, "fetch_models", fake)
-    monkeypatch.setattr(jobs_mod, "fetch_models", fake)
+    monkeypatch.setattr(gw_mod, "fetch_models", fake)
 
 
 @pytest.mark.asyncio

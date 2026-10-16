@@ -75,8 +75,11 @@ export interface ModelOptions {
   gateway_enabled: boolean
   gateway_label: string
   gateway_base_url: string
+  /** 独立计费：用户填 batch 分组 Key，推理走平台接口、按用量扣费 */
+  gateway_billing: boolean
   has_saved_token: boolean
   personal_error?: string | null
+  personal_key?: PersonalKeyInfo | null
   /** 模型名 -> 推理能力 */
   personal_reasoning: Record<string, PersonalReasoningCap>
 }
@@ -85,6 +88,16 @@ export interface PersonalModels {
   models: string[]
   saved: boolean
   reasoning: Record<string, PersonalReasoningCap>
+  key?: PersonalKeyInfo | null
+}
+
+/** 独立计费时用户 batch Key 的额度（网关内部单位，默认 500000 = $1） */
+export interface PersonalKeyInfo {
+  name: string
+  total_available?: number | null
+  unlimited: boolean
+  expires_at?: number | null
+  model_limits?: string[] | null
 }
 
 /** 个人模型的推理能力，由后端按网关规则算好 */
@@ -130,6 +143,9 @@ export interface Job {
   queue_position?: number | null
   prompt_tokens: number
   completion_tokens: number
+  cached_tokens: number
+  /** 个人网关独立计费 */
+  billing_enabled: boolean
   concurrency: number
   params: Record<string, unknown>
   error?: string | null
@@ -232,6 +248,12 @@ export interface SystemSettings {
   user_gateway_reasoning_effort_options: string[]
   user_gateway_reasoning_default_effort: string
   user_gateway_reasoning_rules: GatewayReasoningRule[]
+  user_gateway_billing_enabled: boolean
+  user_gateway_inference_base_url: string
+  user_gateway_inference_api_key_masked?: string | null
+  user_gateway_billing_url: string
+  user_gateway_billing_token_masked?: string | null
+  user_gateway_billing_interval: number
 
   model_job_limits: ModelJobLimit[]
 
@@ -377,6 +399,8 @@ export interface DryRunResult {
   usage: Record<string, number>
   error?: string | null
   response?: Record<string, unknown> | null
+  /** 独立计费时试跑的扣费结果 */
+  billing?: string | null
 }
 
 /** 项目：把任务和 Prompt 归到一起，只对本人可见 */
@@ -384,6 +408,8 @@ export interface Project {
   id: string
   name: string
   description?: string | null
+  /** 每个用户都有一个默认项目，不能删除；没指定项目的任务放在这里 */
+  is_default: boolean
   job_count: number
   /** 其中还在排队/运行的 */
   active_job_count: number
@@ -397,4 +423,64 @@ export interface QueueView {
   pinned: Job[]
   queued: Job[]
   total_queued: number
+}
+
+export type BillingStatus = 'pending' | 'succeeded' | 'failed'
+
+/** 向个人网关上报的一笔用量 */
+export interface BillingRecord {
+  id: number
+  request_id: string
+  user_id: string
+  username?: string | null
+  job_id?: string | null
+  job_name?: string | null
+  model_name: string
+  prompt_tokens: number
+  completion_tokens: number
+  cached_tokens: number
+  note?: string | null
+  status: BillingStatus
+  attempts: number
+  next_attempt_at?: string | null
+  error_code?: string | null
+  error?: string | null
+  error_hint?: string | null
+  quota?: number | null
+  billing_source?: string | null
+  duplicate: boolean
+  created_at: string
+  billed_at?: string | null
+}
+
+export interface BillingBucket {
+  count: number
+  prompt_tokens: number
+  completion_tokens: number
+  quota: number
+}
+
+export interface JobBilling {
+  enabled: boolean
+  personal: boolean
+  succeeded: BillingBucket
+  pending: BillingBucket
+  failed: BillingBucket
+  unbilled_prompt_tokens: number
+  unbilled_completion_tokens: number
+  records: BillingRecord[]
+  message?: string | null
+}
+
+export interface BillingRecordList {
+  total: number
+  items: BillingRecord[]
+  counts: Record<string, number>
+}
+
+export interface GatewayTestResult {
+  inference_ok: boolean
+  inference_detail: string
+  billing_ok: boolean
+  billing_detail: string
 }

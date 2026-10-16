@@ -16,12 +16,13 @@ from ..schemas import (
     ModelConfigUpdate,
     ModelOption,
     ModelOptionsOut,
+    PersonalKeyInfo,
     PersonalModelsOut,
     PersonalReasoningCap,
     PersonalTokenIn,
     ProbeResult,
 )
-from ..services.gateway import GatewayError, fetch_models, resolve_reasoning
+from ..services.gateway import GatewayError, KeyInfo, billing_mode, list_user_models, resolve_reasoning
 from ..services.inference import InferenceClient, InferenceError
 from ..services.settings_store import read_runtime
 
@@ -39,6 +40,10 @@ def _personal_reasoning(models: list[str], runtime: dict) -> dict[str, PersonalR
             default_effort=cfg["default_effort"],
         )
     return out
+
+
+def _key_out(info: KeyInfo | None) -> PersonalKeyInfo | None:
+    return PersonalKeyInfo(**vars(info)) if info else None
 
 
 def _to_out(mc: ModelConfig) -> ModelConfigOut:
@@ -78,6 +83,7 @@ async def list_model_options(user: CurrentUser, db: DB) -> ModelOptionsOut:
         gateway_enabled=bool(runtime["user_gateway_enabled"]),
         gateway_label=runtime["user_gateway_label"],
         gateway_base_url=runtime["user_gateway_base_url"],
+        gateway_billing=billing_mode(runtime),
         has_saved_token=bool(user.llm_token_encrypted),
     )
 
@@ -91,10 +97,11 @@ async def list_model_options(user: CurrentUser, db: DB) -> ModelOptionsOut:
         return out
 
     try:
-        out.personal = await fetch_models(runtime["user_gateway_base_url"], token)
+        out.personal, info = await list_user_models(runtime, token)
     except GatewayError as exc:
         out.personal_error = exc.message
     else:
+        out.personal_key = _key_out(info)
         out.personal_reasoning = _personal_reasoning(out.personal, runtime)
     return out
 
@@ -107,7 +114,7 @@ async def list_personal_models(payload: PersonalTokenIn, user: CurrentUser, db: 
         raise HTTPException(status.HTTP_403_FORBIDDEN, "管理员未开启个人网关")
 
     try:
-        models = await fetch_models(runtime["user_gateway_base_url"], payload.token)
+        models, info = await list_user_models(runtime, payload.token)
     except GatewayError as exc:
         # token 错、网关挂了都属于用户可自行修正的问题，用 400 而不是 502
         raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.message) from exc
@@ -120,7 +127,7 @@ async def list_personal_models(payload: PersonalTokenIn, user: CurrentUser, db: 
         saved = True
 
     return PersonalModelsOut(
-        models=models, saved=saved, reasoning=_personal_reasoning(models, runtime),
+        models=models, saved=saved, reasoning=_personal_reasoning(models, runtime), key=_key_out(info),
     )
 
 

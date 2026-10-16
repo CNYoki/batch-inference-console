@@ -40,7 +40,21 @@ async def get_runtime_settings(db: DB) -> SystemSettingsOut:
     runtime = await read_runtime(db)
     out = SystemSettingsOut(**runtime)
     out.smtp_password_masked = mask_secret(decrypt_secret(runtime.get("smtp_password_encrypted") or ""))
+    out.user_gateway_inference_api_key_masked = mask_secret(
+        decrypt_secret(runtime.get("user_gateway_inference_api_key_encrypted") or "")
+    )
+    out.user_gateway_billing_token_masked = mask_secret(
+        decrypt_secret(runtime.get("user_gateway_billing_token_encrypted") or "")
+    )
     return out
+
+
+# 只写不读的密钥字段：请求里的明文字段 -> 库里的密文字段
+_SECRET_FIELDS = {
+    "smtp_password": "smtp_password_encrypted",
+    "user_gateway_inference_api_key": "user_gateway_inference_api_key_encrypted",
+    "user_gateway_billing_token": "user_gateway_billing_token_encrypted",
+}
 
 
 @router.get("/settings", response_model=SystemSettingsOut)
@@ -69,11 +83,12 @@ async def my_usage(user: CurrentUser, db: DB) -> MyUsage:
 async def update_settings(payload: SystemSettingsUpdate, _: CurrentAdmin, db: DB) -> SystemSettingsOut:
     changes = payload.model_dump(exclude_unset=True, exclude_none=True)
 
-    # SMTP 密码单独处理：空串 = 清除，有值 = 加密后存，不传 = 保持不变
-    if "smtp_password" in payload.model_fields_set:
-        raw = payload.smtp_password
-        changes.pop("smtp_password", None)
-        changes["smtp_password_encrypted"] = encrypt_secret(raw) if raw else ""
+    # 密钥单独处理：空串 = 清除，有值 = 加密后存，不传 = 保持不变
+    for field, stored in _SECRET_FIELDS.items():
+        changes.pop(field, None)
+        if field in payload.model_fields_set:
+            raw = (getattr(payload, field) or "").strip()
+            changes[stored] = encrypt_secret(raw) if raw else ""
 
     await write_runtime(db, changes)
     return await get_runtime_settings(db)
