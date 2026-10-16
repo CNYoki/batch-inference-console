@@ -199,7 +199,7 @@ export default function PromptsPage() {
             <Input maxLength={1024} placeholder="这个 Prompt 适用于什么数据、产出什么" />
           </Form.Item>
           <Form.Item name="project_id" label="所属项目（可选）">
-            <ProjectSelect allowCreate projects={projects} onProjectsChange={setProjects} />
+            <ProjectSelect allowCreate placeholder="不归入项目" projects={projects} onProjectsChange={setProjects} />
           </Form.Item>
 
           <Divider orientation="left" plain>数据变量与 Prompt</Divider>

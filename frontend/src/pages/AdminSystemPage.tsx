@@ -7,7 +7,7 @@ import type { ColumnsType } from 'antd/es/table'
 import { PauseCircleOutlined, ReloadOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import type {
-  Dashboard, MailTestResult, ModelJobLimit, MyUsage, RetentionPreview, SystemSettings, WorkerInfo,
+  Dashboard, GatewayTestResult, MailTestResult, ModelJobLimit, MyUsage, RetentionPreview, SystemSettings, WorkerInfo,
 } from '../api'
 import { usePolling } from '../hooks/usePolling'
 import {
@@ -51,6 +51,9 @@ export default function AdminSystemPage() {
   const [mailResult, setMailResult] = useState<MailTestResult | null>(null)
   const [purging, setPurging] = useState(false)
   const [pausingAll, setPausingAll] = useState(false)
+  const [gatewayTesting, setGatewayTesting] = useState(false)
+  const [gatewayTest, setGatewayTest] = useState<GatewayTestResult | null>(null)
+  const billingOn = Form.useWatch('user_gateway_billing_enabled', form) as boolean | undefined
 
   const load = useCallback(async () => {
     const [d, u] = await Promise.all([
@@ -70,6 +73,8 @@ export default function AdminSystemPage() {
       form.setFieldsValue({
         ...s,
         smtp_password: '',
+        user_gateway_inference_api_key: '',
+        user_gateway_billing_token: '',
         user_gateway_reasoning_payload: JSON.stringify(s.user_gateway_reasoning_payload ?? {}, null, 2),
         user_gateway_reasoning_preset: matchPreset(
           s.user_gateway_reasoning_payload, s.user_gateway_reasoning_effort_options,
@@ -135,6 +140,19 @@ export default function AdminSystemPage() {
         user_gateway_timeout: values.user_gateway_timeout,
         user_gateway_max_retries: values.user_gateway_max_retries,
         user_gateway_max_tokens_cap: values.user_gateway_max_tokens_cap,
+        user_gateway_billing_enabled: values.user_gateway_billing_enabled,
+        // 关掉独立计费时这几项被收起、不在表单里，不提交以免把已填的配置清空
+        ...(values.user_gateway_inference_base_url !== undefined
+          ? { user_gateway_inference_base_url: values.user_gateway_inference_base_url } : {}),
+        ...(values.user_gateway_billing_url !== undefined
+          ? { user_gateway_billing_url: values.user_gateway_billing_url } : {}),
+        ...(values.user_gateway_billing_interval !== undefined
+          ? { user_gateway_billing_interval: values.user_gateway_billing_interval } : {}),
+        // 密钥只在真的输入了新值时才提交，留空 = 保持原值
+        ...(values.user_gateway_inference_api_key
+          ? { user_gateway_inference_api_key: values.user_gateway_inference_api_key } : {}),
+        ...(values.user_gateway_billing_token
+          ? { user_gateway_billing_token: values.user_gateway_billing_token } : {}),
         file_retention_days: values.file_retention_days,
         purge_input_files: values.purge_input_files,
         stale_upload_hours: values.stale_upload_hours,
@@ -183,6 +201,8 @@ export default function AdminSystemPage() {
       form.setFieldsValue({
         ...s,
         smtp_password: '',
+        user_gateway_inference_api_key: '',
+        user_gateway_billing_token: '',
         user_gateway_reasoning_payload: JSON.stringify(s.user_gateway_reasoning_payload ?? {}, null, 2),
         user_gateway_reasoning_preset: matchPreset(
           s.user_gateway_reasoning_payload, s.user_gateway_reasoning_effort_options,
@@ -404,6 +424,85 @@ export default function AdminSystemPage() {
           >
             <Input className="mono" placeholder="https://gateway.example.com/v1" style={{ maxWidth: 460 }} />
           </Form.Item>
+
+          <Form.Item name="user_gateway_billing_enabled" label="独立计费" valuePropName="checked"
+            extra="开启后推理与计费分开：用户填写个人网关里 batch 分组的 Key（仍用它在上面的网关地址拉取模型列表），
+              推理改走下面的推理接口，平台按用量调用计费接口向用户扣费">
+            <Switch />
+          </Form.Item>
+          {billingOn && (
+            <div style={{ border: '1px solid var(--ant-color-border-secondary, #f0f0f0)', borderRadius: 8,
+              padding: '16px 16px 0', marginBottom: 24, maxWidth: 940 }}>
+              <Row gutter={16}>
+                <Col xs={24} md={12}>
+                  <Form.Item name="user_gateway_inference_base_url" label="推理接口 URL"
+                    extra="OpenAI 兼容地址，填到 /v1 为止，执行任务时请求 {地址}/chat/completions"
+                    rules={[
+                      { required: true, message: '开启独立计费时必填' },
+                      { pattern: /^https?:\/\//, message: '必须以 http:// 或 https:// 开头' },
+                    ]}>
+                    <Input className="mono" placeholder="https://inference.example.com/v1" />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={12}>
+                  <Form.Item name="user_gateway_inference_api_key" label="推理接口 API Key"
+                    extra={settings?.user_gateway_inference_api_key_masked
+                      ? `当前：${settings.user_gateway_inference_api_key_masked}，留空表示不修改`
+                      : '平台自己的 Key，加密存储，不会回显'}>
+                    <Input.Password className="mono" autoComplete="new-password"
+                      placeholder={settings?.user_gateway_inference_api_key_masked ? '不修改请留空' : 'sk-...'} />
+                  </Form.Item>
+                </Col>
+              </Row>
+              <Row gutter={16}>
+                <Col xs={24} md={12}>
+                  <Form.Item name="user_gateway_billing_url" label="计费接口 URL"
+                    extra="个人网关的批量计费接口完整地址"
+                    rules={[
+                      { required: true, message: '开启独立计费时必填' },
+                      { pattern: /^https?:\/\//, message: '必须以 http:// 或 https:// 开头' },
+                    ]}>
+                    <Input className="mono" placeholder="https://gateway.example.com/api/batch/billing" />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={12}>
+                  <Form.Item name="user_gateway_billing_token" label="计费接口 API Key"
+                    extra={settings?.user_gateway_billing_token_masked
+                      ? `当前：${settings.user_gateway_billing_token_masked}，留空表示不修改`
+                      : '个人网关管理员创建的访问令牌，只需勾选「批量计费 → 编辑」权限'}>
+                    <Input.Password className="mono" autoComplete="new-password"
+                      placeholder={settings?.user_gateway_billing_token_masked ? '不修改请留空' : 'nap_...'} />
+                  </Form.Item>
+                </Col>
+              </Row>
+              <Space size={24} align="start" wrap>
+                <Form.Item name="user_gateway_billing_interval" label="计费间隔(秒)"
+                  extra="运行中的任务每隔这么久把新增用量扣一次费；暂停、取消、完成时立即结算">
+                  <InputNumber min={10} max={3600} style={{ width: 140 }} />
+                </Form.Item>
+                <Form.Item label="连通性" extra="用已保存的配置测试，计费接口只发空请求、不会扣费">
+                  <Space>
+                    <Button loading={gatewayTesting} onClick={async () => {
+                      setGatewayTesting(true)
+                      try {
+                        setGatewayTest(await api.testGateway())
+                      } finally {
+                        setGatewayTesting(false)
+                      }
+                    }}>测试推理与计费接口</Button>
+                  </Space>
+                </Form.Item>
+              </Space>
+              {gatewayTest && (
+                <Space direction="vertical" style={{ width: '100%', marginBottom: 16 }}>
+                  <Alert type={gatewayTest.inference_ok ? 'success' : 'error'} showIcon
+                    message={`推理接口：${gatewayTest.inference_detail}`} />
+                  <Alert type={gatewayTest.billing_ok ? 'success' : 'error'} showIcon
+                    message={`计费接口：${gatewayTest.billing_detail}`} />
+                </Space>
+              )}
+            </div>
+          )}
           <Space size={24} align="start" wrap>
             <Form.Item name="user_gateway_max_concurrency" label="并发上限"
               extra="个人 token 配额通常有限">

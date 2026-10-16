@@ -269,7 +269,7 @@ export default function JobsPage() {
           onChange={(v: JobStatus[]) => updateQuery({ status: v.join(',') })}
         />
         <ProjectSelect
-          withUnassigned placeholder="按项目筛选" style={{ width: 200 }}
+          placeholder="按项目筛选" style={{ width: 200 }}
           value={project || null}
           onChange={(v) => updateQuery({ project: v })}
         />

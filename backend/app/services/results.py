@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import settings
-from .inference import extract_output_text
+from .inference import cached_tokens_of, extract_output_text
 
 log = logging.getLogger(__name__)
 
@@ -46,12 +46,13 @@ class ResumeState:
     failed: int
     prompt_tokens: int
     completion_tokens: int
+    cached_tokens: int = 0
 
 
 def scan_resume_state(job_id: str) -> ResumeState:
     """读已有结果文件，得出哪些条目已处理过。文件损坏的行直接跳过。"""
     done: set[int] = set()
-    completed = failed = ptok = ctok = 0
+    completed = failed = ptok = ctok = cached = 0
 
     for path, is_error in ((output_path(job_id), False), (errors_path(job_id), True)):
         if not path.exists():
@@ -76,8 +77,9 @@ def scan_resume_state(job_id: str) -> ResumeState:
                     usage = ((obj.get("response") or {}).get("body") or {}).get("usage") or {}
                     ptok += int(usage.get("prompt_tokens") or 0)
                     ctok += int(usage.get("completion_tokens") or 0)
+                    cached += cached_tokens_of(usage)
 
-    return ResumeState(done, completed, failed, ptok, ctok)
+    return ResumeState(done, completed, failed, ptok, ctok, cached)
 
 
 class ResultWriter:

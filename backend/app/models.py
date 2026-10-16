@@ -242,7 +242,8 @@ class ModelConfig(Base, TimestampMixin):
 class Project(Base, TimestampMixin):
     """用户自己的项目，用来把同一件事的任务和 Prompt 归到一起，只对本人可见。
 
-    删除项目不会删掉里面的任务和 Prompt，只是把它们挪回「未归类」。
+    每个用户都有一个默认项目（is_default），任务总归属于某个项目：
+    建任务没指定项目时放进默认项目；删除项目时里面的任务挪回默认项目、Prompt 变成未归类。
     """
 
     __tablename__ = "projects"
@@ -251,6 +252,8 @@ class Project(Base, TimestampMixin):
     user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # 默认项目不能删，每个用户恰好一个（由 services.projects.ensure_default_project 保证）
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     user: Mapped[User] = relationship(back_populates="projects")
 
@@ -311,6 +314,19 @@ class Job(Base, TimestampMixin):
 
     prompt_tokens: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     completion_tokens: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    # 命中缓存的输入 token（包含在 prompt_tokens 里），独立计费时按缓存价计
+    cached_tokens: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+
+    # ---- 个人网关独立计费 ----
+    # 推理走平台自己的推理接口、再按用量调计费接口向用户扣费。由 worker 每次开跑时按当前设置定下来
+    billing_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # 已经切进计费记录的用量（不论那条记录是否已扣费成功）。
+    # 用量计数减去这里就是还没计费的部分；切记录和推进这几个数在同一个事务里完成，所以不会重复计费
+    billed_prompt_tokens: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    billed_completion_tokens: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    billed_cached_tokens: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    # 已切出的计费记录条数，兼作乐观锁的版本号
+    billing_seq: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -424,6 +440,68 @@ class ApiToken(Base, TimestampMixin):
     user: Mapped[User] = relationship(back_populates="api_tokens")
 
     __table_args__ = (Index("ix_api_tokens_user", "user_id"),)
+
+
+# --------------------------------------------------------------------------- #
+# 个人网关计费记录
+# --------------------------------------------------------------------------- #
+class BillingStatus(str, enum.Enum):
+    pending = "pending"        # 待发送，或上次遇到网络/5xx 等临时错误、等着重试
+    succeeded = "succeeded"    # 网关已扣费（含 duplicate：之前就扣过）
+    failed = "failed"          # 被网关拒绝（余额不足、Key 失效等），要人处理后再重试
+
+
+class BillingRecord(Base):
+    """向个人网关上报的一笔用量。
+
+    先在库里落一条记录、再发请求：request_id 由任务 ID 和序号拼成，重试多少次都不变，
+    网关按 request_id 去重 —— 所以网络超时、进程崩溃后重发都不会重复扣费。
+    """
+
+    __tablename__ = "billing_records"
+
+    id: Mapped[int] = mapped_column(AutoBigInt, primary_key=True, autoincrement=True)
+    request_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    # 任务删了记录也得留着继续扣
+    job_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True
+    )
+    # 切记录时用户的 Key（Fernet 密文）。同一个 request_id 换 Key 重发会被网关判为冲突，所以要固定下来
+    key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    prompt_tokens: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    completion_tokens: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    cached_tokens: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    status: Mapped[BillingStatus] = mapped_column(
+        SAEnum(BillingStatus, native_enum=False, length=16), default=BillingStatus.pending, nullable=False
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # 早于这个时间不发：临时错误的退避，以及发送中的占用（防止多个 worker 同时发同一笔）
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # 网关回执
+    quota: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    billing_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    duplicate: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, server_default=func.now(), nullable=False
+    )
+    billed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped[User] = relationship()
+    job: Mapped[Job | None] = relationship()
+
+    __table_args__ = (
+        Index("ix_billing_status_next", "status", "next_attempt_at"),
+        Index("ix_billing_job", "job_id"),
+        Index("ix_billing_user_created", "user_id", "created_at"),
+    )
 
 
 # --------------------------------------------------------------------------- #

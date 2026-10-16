@@ -12,6 +12,7 @@ import ScriptGeneratorPage from './pages/ScriptGeneratorPage'
 import PromptsPage from './pages/PromptsPage'
 import ProjectsPage from './pages/ProjectsPage'
 import AdminQueuePage from './pages/AdminQueuePage'
+import AdminBillingPage from './pages/AdminBillingPage'
 import AdminModelsPage from './pages/AdminModelsPage'
 import AdminUsersPage from './pages/AdminUsersPage'
 import AdminSystemPage from './pages/AdminSystemPage'
@@ -61,6 +62,10 @@ export default function App() {
         <Route
           path="admin/queue"
           element={<Guard adminOnly><AdminQueuePage /></Guard>}
+        />
+        <Route
+          path="admin/billing"
+          element={<Guard adminOnly><AdminBillingPage /></Guard>}
         />
         <Route
           path="admin/system"

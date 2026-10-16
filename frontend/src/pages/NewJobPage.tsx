@@ -8,7 +8,7 @@ import { InboxOutlined, KeyOutlined, ReloadOutlined } from '@ant-design/icons'
 import type { UploadFile } from 'antd/es/upload/interface'
 import { api } from '../api'
 import type {
-  DryRunResult, ModelOption, ModelOptions, MyUsage, SystemSettings, UploadResult,
+  DryRunResult, ModelOption, ModelOptions, MyUsage, PersonalKeyInfo, SystemSettings, UploadResult,
 } from '../api'
 import JobParamsFields, { formToParams } from '../components/JobParamsFields'
 import ProjectSelect from '../components/ProjectSelect'
@@ -33,6 +33,14 @@ type DryState = {
 function errorDetail(err: unknown): string | undefined {
   const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
   return typeof detail === 'string' ? detail : undefined
+}
+
+/** batch Key 的剩余额度提示。网关内部单位默认 500000 = $1 */
+function keyQuotaText(info?: PersonalKeyInfo | null): string | undefined {
+  if (!info) return undefined
+  if (info.unlimited) return 'Key 额度：不限（实际扣费以账户余额为准）'
+  if (info.total_available == null) return undefined
+  return `Key 剩余额度 ${info.total_available.toLocaleString()}（约 $${(info.total_available / 500000).toFixed(2)}）`
 }
 
 export default function NewJobPage() {
@@ -85,7 +93,7 @@ export default function NewJobPage() {
 
   const fetchPersonalModels = async () => {
     if (!token.trim()) {
-      message.warning('请先填写你的网关 token')
+      message.warning(options?.gateway_billing ? '请先填写你的 batch 分组 Key' : '请先填写你的网关 token')
       return
     }
     setTokenLoading(true)
@@ -95,6 +103,7 @@ export default function NewJobPage() {
       setOptions((prev) => prev && {
         ...prev, personal: res.models, personal_error: null,
         personal_reasoning: res.reasoning ?? {},
+        personal_key: res.key ?? null,
         has_saved_token: prev.has_saved_token || res.saved,
       })
       setEditingToken(false)
@@ -199,6 +208,8 @@ export default function NewJobPage() {
         return
       }
       setDry({ phase: 'submitting', job, result: res })
+      // 独立计费时试跑那条也会扣费；扣不上的提醒一下，任务照常提交
+      if (res.billing?.includes('失败')) message.warning(res.billing, 6)
       await submitJob(job)
     } catch (err) {
       setDry({
@@ -325,7 +336,7 @@ export default function NewJobPage() {
                       message="个人模型列表拉取失败"
                       description={<>
                         {options.personal_error}
-                        <br />请重新填写你的 token。
+                        <br />请重新填写你的 {options.gateway_billing ? 'batch 分组 Key' : 'token'}。
                       </>}
                     />
                   )}
@@ -333,7 +344,9 @@ export default function NewJobPage() {
                   {options.has_saved_token && !editingToken ? (
                     <Alert
                       type="success" showIcon style={{ marginBottom: 12 }}
-                      message={`已保存你的 ${options.gateway_label} token，拉取到 ${options.personal.length} 个可用模型`}
+                      message={`已保存你的 ${options.gateway_label} ${options.gateway_billing ? 'Key' : 'token'}，`
+                        + `拉取到 ${options.personal.length} 个可用模型`}
+                      description={options.gateway_billing ? keyQuotaText(options.personal_key) : undefined}
                       action={
                         <Space>
                           <Button size="small" onClick={() => { setToken(''); setEditingToken(true) }}>
@@ -345,7 +358,15 @@ export default function NewJobPage() {
                     />
                   ) : (
                     <div style={{ marginBottom: 12 }}>
-                      <Typography.Text strong>{options.gateway_label} token</Typography.Text>
+                      <Typography.Text strong>
+                        {options.gateway_label} {options.gateway_billing ? 'batch 分组 Key' : 'token'}
+                      </Typography.Text>
+                      {options.gateway_billing && (
+                        <Typography.Paragraph type="secondary" style={{ marginBottom: 8, fontSize: 12 }}>
+                          请在{options.gateway_label}的 API 令牌里新建一个分组为 batch 的 Key 填到这里。
+                          推理由平台代为执行，按实际用量定期从你的{options.gateway_label}账户扣费，扣费记录可在使用日志里查到。
+                        </Typography.Paragraph>
+                      )}
                       {/* <Typography.Paragraph type="secondary" style={{ marginBottom: 8, fontSize: 12 }}>
                         填写你本人的 token，系统会去 <span className="mono">{options.gateway_base_url}</span> 拉取
                         你有权限的模型。
@@ -390,7 +411,10 @@ export default function NewJobPage() {
 
               {selection?.source === 'personal' && (
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  该任务将以你的 token 调用 {options?.gateway_label}，并发上限
+                  {options?.gateway_billing
+                    ? `该任务由平台执行推理，按用量每 ${settings?.user_gateway_billing_interval ?? 60} 秒`
+                      + `从你的 ${options?.gateway_label} 账户扣一次费；余额不足时任务会自动暂停，充值后点「继续」即可。并发上限 `
+                    : `该任务将以你的 token 调用 ${options?.gateway_label}，并发上限 `}
                   {settings?.user_gateway_max_concurrency ?? 4}。
                 </Typography.Text>
               )}
@@ -403,8 +427,10 @@ export default function NewJobPage() {
               <Form.Item name="name" label="任务名称" rules={[{ required: true, message: '请填写任务名称' }]}>
                 <Input placeholder="例：数据标注-chunk1" maxLength={255} />
               </Form.Item>
-              <Form.Item name="project_id" label="所属项目" extra="可选。用来归类，之后在任务列表里也能随时调整">
-                <ProjectSelect allowCreate style={{ maxWidth: 360 }} />
+              <Form.Item name="project_id" label="所属项目"
+                rules={[{ required: true, message: '请选择项目' }]}
+                extra="每个任务都要归入一个项目，默认选中「默认项目」；之后在任务列表里也能随时调整">
+                <ProjectSelect allowCreate allowClear={false} pickDefault style={{ maxWidth: 360 }} />
               </Form.Item>
 
               <JobParamsFields

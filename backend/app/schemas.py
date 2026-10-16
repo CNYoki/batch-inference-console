@@ -264,6 +264,15 @@ class ModelOption(BaseModel):
     max_tokens_cap: int
 
 
+class PersonalKeyInfo(BaseModel):
+    name: str = ""
+    # 网关内部额度单位（默认 500000 = $1）
+    total_available: int | None = None
+    unlimited: bool = False
+    expires_at: int | None = None
+    model_limits: list[str] | None = None
+
+
 class ModelOptionsOut(BaseModel):
     """新建任务页要用的全部可选模型：公用 + 个人。"""
 
@@ -274,9 +283,13 @@ class ModelOptionsOut(BaseModel):
     gateway_enabled: bool = True
     gateway_label: str = "个人网关"
     gateway_base_url: str = ""
+    # 独立计费：用户填的是 batch 分组 Key，推理走平台接口、按用量扣费
+    gateway_billing: bool = False
     has_saved_token: bool = False
     # 拉取个人模型失败时的原因（token 无效、网关不可达等），前端原样展示
     personal_error: str | None = None
+    # 独立计费时用户 Key 的额度
+    personal_key: PersonalKeyInfo | None = None
 
 
 class PersonalTokenIn(BaseModel):
@@ -289,6 +302,7 @@ class PersonalModelsOut(BaseModel):
     models: list[str]
     saved: bool = False
     reasoning: dict[str, PersonalReasoningCap] = Field(default_factory=dict)
+    key: PersonalKeyInfo | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -340,6 +354,8 @@ class JobOut(BaseModel):
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cached_tokens: int = 0
+    billing_enabled: bool = False
     concurrency: int = 0
     params: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
@@ -449,6 +465,8 @@ class JobDryRunOut(BaseModel):
     usage: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
     response: dict[str, Any] | None = None
+    # 独立计费时试跑的扣费结果；None 表示不涉及计费
+    billing: str | None = None
 
 
 class PauseAllOut(BaseModel):
@@ -676,6 +694,7 @@ class ProjectOut(BaseModel):
     id: str
     name: str
     description: str | None = None
+    is_default: bool = False
     job_count: int = 0
     # 其中还在排队/运行的
     active_job_count: int = 0
@@ -771,6 +790,15 @@ class SystemSettingsOut(BaseModel):
     # 按模型名覆盖上面那份默认配置，先命中先生效
     user_gateway_reasoning_rules: list[GatewayReasoningRule] = Field(default_factory=list)
 
+    # ---- 个人网关独立计费 ----
+    user_gateway_billing_enabled: bool = False
+    user_gateway_inference_base_url: str = ""
+    # 两个密钥都只回掩码
+    user_gateway_inference_api_key_masked: str | None = None
+    user_gateway_billing_url: str = ""
+    user_gateway_billing_token_masked: str | None = None
+    user_gateway_billing_interval: int = 60
+
     # ---- 单模型同时运行的任务数上限 ----
     model_job_limits: list[ModelJobLimit] = Field(default_factory=list)
 
@@ -837,6 +865,14 @@ class SystemSettingsUpdate(BaseModel):
     )
     model_job_limits: list[ModelJobLimit] | None = Field(default=None, max_length=100)
 
+    user_gateway_billing_enabled: bool | None = None
+    user_gateway_inference_base_url: str | None = Field(default=None, max_length=1024)
+    # 传空字符串 = 清除；不传 = 保持不变
+    user_gateway_inference_api_key: str | None = Field(default=None, max_length=1024)
+    user_gateway_billing_url: str | None = Field(default=None, max_length=1024)
+    user_gateway_billing_token: str | None = Field(default=None, max_length=1024)
+    user_gateway_billing_interval: int | None = Field(default=None, ge=10, le=3600)
+
     file_retention_days: int | None = Field(default=None, ge=0, le=3650)
     purge_input_files: bool | None = None
     stale_upload_hours: int | None = Field(default=None, ge=0, le=8760)
@@ -862,7 +898,7 @@ class SystemSettingsUpdate(BaseModel):
     mail_subject_template: str | None = Field(default=None, max_length=500)
     mail_body_template: str | None = Field(default=None, max_length=20000)
 
-    @field_validator("user_gateway_base_url")
+    @field_validator("user_gateway_base_url", "user_gateway_inference_base_url", "user_gateway_billing_url")
     @classmethod
     def _check_gateway_url(cls, v: str | None) -> str | None:
         if v and not v.startswith(("http://", "https://")):
@@ -888,3 +924,68 @@ class ProbeResult(BaseModel):
     latency_ms: int | None = None
     url: str | None = None
     detail: Any = None
+
+
+# --------------------------------------------------------------------------- #
+# 个人网关计费
+# --------------------------------------------------------------------------- #
+class BillingRecordOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
+
+    id: int
+    request_id: str
+    user_id: str
+    username: str | None = None
+    job_id: str | None = None
+    job_name: str | None = None
+    model_name: str
+    prompt_tokens: int
+    completion_tokens: int
+    cached_tokens: int
+    note: str | None = None
+    status: str
+    attempts: int
+    next_attempt_at: datetime | None = None
+    error_code: str | None = None
+    error: str | None = None
+    # 给用户看的错误说明
+    error_hint: str | None = None
+    quota: int | None = None
+    billing_source: str | None = None
+    duplicate: bool = False
+    created_at: datetime
+    billed_at: datetime | None = None
+
+
+class BillingBucket(BaseModel):
+    count: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    quota: int = 0
+
+
+class JobBillingOut(BaseModel):
+    enabled: bool
+    personal: bool
+    succeeded: BillingBucket
+    pending: BillingBucket
+    failed: BillingBucket
+    unbilled_prompt_tokens: int = 0
+    unbilled_completion_tokens: int = 0
+    records: list[BillingRecordOut] = Field(default_factory=list)
+    # 用户点「重试计费」后的结果说明
+    message: str | None = None
+
+
+class BillingRecordListOut(BaseModel):
+    total: int
+    items: list[BillingRecordOut]
+    # 全站各状态的笔数，后台页顶部的统计
+    counts: dict[str, int] = Field(default_factory=dict)
+
+
+class GatewayTestResult(BaseModel):
+    inference_ok: bool
+    inference_detail: str
+    billing_ok: bool
+    billing_detail: str

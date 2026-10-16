@@ -43,6 +43,20 @@ DEFAULTS: dict = {
     #   "effort_options": [...], "default_effort": "medium"}]
     # pattern 支持 * 通配，按顺序取第一条命中的
     "user_gateway_reasoning_rules": [],
+    # ---- 个人网关独立计费 ----
+    # 开启后推理和计费分开：推理用下面配置的推理接口和平台自己的 Key，
+    # 用户填的是网关里 batch 分组的 Key，只用来标识向谁扣费；
+    # worker 按用量定期调计费接口（POST /api/batch/billing）扣费
+    "user_gateway_billing_enabled": False,
+    # OpenAI 兼容地址，填到 /v1 为止
+    "user_gateway_inference_base_url": "",
+    "user_gateway_inference_api_key_encrypted": "",
+    # 计费接口完整地址，例 https://gateway.example.com/api/batch/billing
+    "user_gateway_billing_url": "",
+    # 管理员访问令牌 nap_...（只需 batch_billing:write 权限）
+    "user_gateway_billing_token_encrypted": "",
+    # 运行中的任务每隔多少秒把新增用量扣一次费；暂停、取消、完成时也会立即结算
+    "user_gateway_billing_interval": 60,
     # ---- 单模型同时运行的任务数上限（所有 worker 合计）----
     # 按真实模型名匹配：公用模型取配置里的 model_name，个人网关模型取网关里的模型名。
     # [{"pattern": "qwen3.8-27b", "max_running_jobs": 4}]
