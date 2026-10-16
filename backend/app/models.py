@@ -90,6 +90,10 @@ TERMINAL_STATUSES = {JobStatus.succeeded, JobStatus.completed, JobStatus.failed,
 # 中途下载会拿到不完整甚至截断的内容
 DOWNLOADABLE_STATUSES = {JobStatus.succeeded, JobStatus.completed, JobStatus.canceled}
 
+# 置顶任务处在这些状态时，同模型的其他任务不能运行。
+# 暂停不算：置顶任务停下来时不能让整个模型跟着停摆，恢复后会重新抢占
+PIN_BLOCKING_STATUSES = {JobStatus.pending, JobStatus.queued, JobStatus.running}
+
 # 只有停下来、且不会再有 worker 在跑的任务才能换模型。
 # 运行中的 worker 手里握着旧配置，这时改库也不会生效
 MODEL_EDITABLE_STATUSES = {JobStatus.paused, JobStatus.canceled, JobStatus.failed}
@@ -141,6 +145,9 @@ class User(Base, TimestampMixin):
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
     api_tokens: Mapped[list[ApiToken]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+    )
+    projects: Mapped[list[Project]] = relationship(
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
 
@@ -230,6 +237,28 @@ class ModelConfig(Base, TimestampMixin):
 
 
 # --------------------------------------------------------------------------- #
+# 项目（把任务、Prompt 归到一起）
+# --------------------------------------------------------------------------- #
+class Project(Base, TimestampMixin):
+    """用户自己的项目，用来把同一件事的任务和 Prompt 归到一起，只对本人可见。
+
+    删除项目不会删掉里面的任务和 Prompt，只是把它们挪回「未归类」。
+    """
+
+    __tablename__ = "projects"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(String(32), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+
+    user: Mapped[User] = relationship(back_populates="projects")
+
+    # 同一个人的项目不能重名；唯一索引的前缀也覆盖了按用户查询
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_project_name"),)
+
+
+# --------------------------------------------------------------------------- #
 # 任务
 # --------------------------------------------------------------------------- #
 class Job(Base, TimestampMixin):
@@ -248,12 +277,18 @@ class Job(Base, TimestampMixin):
         SAEnum(ModelSource, native_enum=False, length=16), default=ModelSource.shared, nullable=False
     )
     personal_model_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    project_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("projects.id", ondelete="SET NULL"), nullable=True
+    )
 
     status: Mapped[JobStatus] = mapped_column(
         SAEnum(JobStatus, native_enum=False, length=16), default=JobStatus.pending, nullable=False
     )
     # 数值越小越优先
     priority: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
+    # 管理员置顶：排在队首，且运行期间同模型的其他任务全部让出、回到队列等它结束
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # 用户提交的推理参数（已与模型配置合并前的原始值）
     params: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
@@ -290,6 +325,7 @@ class Job(Base, TimestampMixin):
 
     user: Mapped[User] = relationship(back_populates="jobs")
     model_config: Mapped[ModelConfig | None] = relationship(back_populates="jobs")
+    project: Mapped[Project | None] = relationship()
     errors: Mapped[list[JobError]] = relationship(
         back_populates="job", cascade="all, delete-orphan", passive_deletes=True
     )
@@ -297,6 +333,7 @@ class Job(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_jobs_user_created", "user_id", "created_at"),
         Index("ix_jobs_status", "status"),
+        Index("ix_jobs_project", "project_id"),
     )
 
     @property
@@ -347,11 +384,18 @@ class UserPrompt(Base, TimestampMixin):
     prompt_template: Mapped[str] = mapped_column(LongText, nullable=False)
     # [{"name": "data", "field": "content"}, ...]
     variables: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    project_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("projects.id", ondelete="SET NULL"), nullable=True
+    )
 
     user: Mapped[User] = relationship(back_populates="prompts")
+    project: Mapped[Project | None] = relationship()
 
     # 同一个人的 Prompt 不能重名，否则在下拉框里分不清；唯一索引的前缀也覆盖了按用户查询
-    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_user_prompt_name"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_user_prompt_name"),
+        Index("ix_user_prompts_project", "project_id"),
+    )
 
 
 # --------------------------------------------------------------------------- #

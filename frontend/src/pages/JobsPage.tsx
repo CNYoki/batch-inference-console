@@ -6,12 +6,14 @@ import {
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import {
-  DeleteOutlined, DownloadOutlined, MoreOutlined, PauseCircleOutlined, PlayCircleOutlined,
-  PlusOutlined, ReloadOutlined, StopOutlined,
+  DeleteOutlined, DownloadOutlined, FolderOutlined, MoreOutlined, PauseCircleOutlined,
+  PlayCircleOutlined, PlusOutlined, PushpinFilled, PushpinOutlined, ReloadOutlined, StopOutlined,
 } from '@ant-design/icons'
 import { api, downloadUrl } from '../api'
 import type { Job, JobStatus } from '../api'
 import JobStatusTag from '../components/JobStatusTag'
+import MoveToProjectModal from '../components/MoveToProjectModal'
+import ProjectSelect from '../components/ProjectSelect'
 import { useAuth } from '../hooks/useAuth'
 import { usePolling } from '../hooks/usePolling'
 import { ACTIVE_STATUSES, STATUS_LABEL, formatDateTime, formatDuration, formatNumber } from '../utils'
@@ -23,7 +25,7 @@ const STATUS_OPTIONS = (Object.keys(STATUS_LABEL) as JobStatus[]).map((s) => ({
 export default function JobsPage() {
   const navigate = useNavigate()
   const { modal, message } = App.useApp()
-  const { isAdmin } = useAuth()
+  const { isAdmin, user } = useAuth()
 
   const location = useLocation()
   const [data, setData] = useState<Job[]>([])
@@ -40,6 +42,10 @@ export default function JobsPage() {
   )
   const keyword = searchParams.get('q') ?? ''
   const mine = searchParams.get('all') !== '1'
+  // 项目 id；'none' 表示未归类
+  const project = searchParams.get('project') ?? ''
+  const [selected, setSelected] = useState<string[]>([])
+  const [moving, setMoving] = useState<{ ids: string[]; current?: string | null } | null>(null)
 
   /** 改网址参数；值为 null/空串即删掉该项。除了翻页，改其他条件都回到第一页 */
   const updateQuery = useCallback((changes: Record<string, string | number | null>) => {
@@ -62,6 +68,7 @@ export default function JobsPage() {
         status: statuses.length ? statuses.join(',') : undefined,
         keyword: keyword || undefined,
         mine: isAdmin ? mine : true,
+        project: project || undefined,
       })
       // 回来时这一页可能已经空了（比如在详情页删掉了最后一页唯一的任务），退到最后一页
       if (!res.items.length && page > 1 && res.total > 0) {
@@ -74,7 +81,7 @@ export default function JobsPage() {
     } finally {
       setLoading(false)
     }
-  }, [page, pageSize, statuses, keyword, mine, isAdmin, updateQuery])
+  }, [page, pageSize, statuses, keyword, mine, isAdmin, project, updateQuery])
 
   /** 进详情时带上列表的网址参数，详情页的「返回」按它回到原来那一页 */
   const openJob = (id: string) => navigate(`/jobs/${id}`, { state: { from: location.search } })
@@ -104,12 +111,38 @@ export default function JobsPage() {
     })
   }
 
+  const confirmPin = (job: Job) => {
+    modal.confirm({
+      title: `置顶任务「${job.name}」？`,
+      content: '置顶后它排到队首；同一模型上正在运行的其他任务会暂停下来回到队列，'
+        + '直到它完成、失败或被取消后才继续（已完成的条目不会重跑）。',
+      okText: '置顶', cancelText: '取消',
+      onOk: () => act(() => api.pinJob(job.id), '已置顶'),
+    })
+  }
+
   const columns: ColumnsType<Job> = [
     {
       title: '任务名称', dataIndex: 'name', width: 220, ellipsis: true,
       render: (name: string, job) => (
-        <a onClick={() => openJob(job.id)}>{name}</a>
+        <Space size={4}>
+          {job.pinned && (
+            <Tooltip title="管理员置顶：排在队首，运行期间同模型的其他任务让出">
+              <PushpinFilled style={{ color: '#fa541c' }} />
+            </Tooltip>
+          )}
+          <a onClick={() => openJob(job.id)}>{name}</a>
+        </Space>
       ),
+    },
+    {
+      title: '项目', dataIndex: 'project_name', width: 140, ellipsis: true,
+      render: (name: string | null, job) => name
+        ? (
+          <Tag icon={<FolderOutlined />} style={{ cursor: 'pointer' }}
+            onClick={() => updateQuery({ project: job.project_id ?? null })}>{name}</Tag>
+        )
+        : <Typography.Text type="secondary">—</Typography.Text>,
     },
     ...(isAdmin && !mine
       ? [{ title: '提交者', dataIndex: 'username', width: 120 } as ColumnsType<Job>[number]]
@@ -126,7 +159,7 @@ export default function JobsPage() {
       ),
     },
     {
-      title: '状态', dataIndex: 'status', width: 130,
+      title: '状态', dataIndex: 'status', width: 170,
       render: (status: JobStatus, job) => (
         <Space size={4}>
           <JobStatusTag status={status} />
@@ -166,6 +199,8 @@ export default function JobsPage() {
         const purged = !!job.files_purged_at
         // 结果文件在任务跑动时一直被追加写入，跑完之前不给下载
         const canDownload = finished && !purged && (job.completed_items > 0 || job.failed_items > 0)
+        const own = job.user_id === user?.id
+        const canPin = isAdmin && ['queued', 'running', 'paused'].includes(job.status)
         return (
           <Dropdown
             trigger={['click']}
@@ -180,6 +215,11 @@ export default function JobsPage() {
                   ? [{ key: 'resume', icon: <PlayCircleOutlined />, label: '恢复' }] : []),
                 ...(job.failed_items > 0 && finished && !purged
                   ? [{ key: 'retry', icon: <ReloadOutlined />, label: '重试失败条目' }] : []),
+                ...(own ? [{ key: 'project', icon: <FolderOutlined />, label: '归入项目…' }] : []),
+                ...(canPin && !job.pinned
+                  ? [{ key: 'pin', icon: <PushpinOutlined />, label: '置顶（管理员）' }] : []),
+                ...(isAdmin && job.pinned
+                  ? [{ key: 'unpin', icon: <PushpinOutlined />, label: '取消置顶' }] : []),
                 ...(canCancel ? [{ key: 'cancel', icon: <StopOutlined />, label: '取消', danger: true }] : []),
                 ...(!canCancel ? [{ key: 'delete', icon: <DeleteOutlined />, label: '删除', danger: true }] : []),
               ],
@@ -190,6 +230,9 @@ export default function JobsPage() {
                 if (key === 'pause') void act(() => api.pauseJob(job.id), '已请求暂停')
                 if (key === 'resume') void act(() => api.resumeJob(job.id), '已重新入队')
                 if (key === 'retry') void act(() => api.retryFailed(job.id), '已重新入队失败条目')
+                if (key === 'project') setMoving({ ids: [job.id], current: job.project_id })
+                if (key === 'pin') confirmPin(job)
+                if (key === 'unpin') void act(() => api.unpinJob(job.id), '已取消置顶')
                 if (key === 'cancel') void act(() => api.cancelJob(job.id), '已请求取消')
                 if (key === 'delete') confirmDelete(job)
               },
@@ -225,6 +268,16 @@ export default function JobsPage() {
           options={STATUS_OPTIONS} value={statuses}
           onChange={(v: JobStatus[]) => updateQuery({ status: v.join(',') })}
         />
+        <ProjectSelect
+          withUnassigned placeholder="按项目筛选" style={{ width: 200 }}
+          value={project || null}
+          onChange={(v) => updateQuery({ project: v })}
+        />
+        {selected.length > 0 && (
+          <Button icon={<FolderOutlined />} onClick={() => setMoving({ ids: selected })}>
+            将选中的 {selected.length} 个任务归入项目
+          </Button>
+        )}
         {isAdmin && (
           <Space>
             <Switch checked={!mine} onChange={(v) => updateQuery({ all: v ? '1' : null })} />
@@ -238,13 +291,27 @@ export default function JobsPage() {
         loading={loading}
         columns={columns}
         dataSource={data}
-        scroll={{ x: 1100 }}
+        scroll={{ x: 1280 }}
+        rowSelection={{
+          selectedRowKeys: selected,
+          onChange: (keys) => setSelected(keys as string[]),
+          // 项目只对本人可见，只能归类自己的任务
+          getCheckboxProps: (job) => ({ disabled: job.user_id !== user?.id }),
+          preserveSelectedRowKeys: true,
+        }}
         pagination={{
           current: page, pageSize, total, showSizeChanger: true,
           showTotal: (t) => `共 ${formatNumber(t)} 个任务`,
           // 默认值不写进网址，保持地址干净
           onChange: (p, ps) => updateQuery({ page: p > 1 ? p : null, size: ps !== 20 ? ps : null }),
         }}
+      />
+
+      <MoveToProjectModal
+        jobIds={moving?.ids ?? []}
+        current={moving?.current}
+        onClose={() => setMoving(null)}
+        onMoved={() => { setSelected([]); void load() }}
       />
     </Card>
   )

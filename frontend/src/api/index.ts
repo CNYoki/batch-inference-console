@@ -1,7 +1,7 @@
 import { http } from './client'
 import type {
   ApiToken, ApiTokenCreated, AuthInfo, Dashboard, DryRunResult, Job, JobErrorRow, JobList, MailTestResult, ModelConfig,
-  ModelOption, ModelOptions, MyUsage, PersonalModels, ResultPage, RetentionPreview,
+  ModelOption, ModelOptions, MyUsage, PersonalModels, Project, QueueView, ResultPage, RetentionPreview,
   SavedPrompt, SavedPromptInput, ScriptConfig, ScriptPreview, SystemSettings, UploadResult, User,
 } from './types'
 
@@ -68,6 +68,7 @@ export const api = {
     params: Record<string, unknown>
     concurrency?: number
     priority?: number
+    project_id?: string | null
   }) => http.post<Job>('/jobs', payload).then((r) => r.data),
   // 试跑：真发一条，超时交给后端的 request_timeout 管，前端不另设
   dryRunJob: (payload: {
@@ -80,8 +81,10 @@ export const api = {
     params: Record<string, unknown>
   }) => http.post<DryRunResult>('/jobs/dry-run', payload, { timeout: 0, skipErrorToast: true })
     .then((r) => r.data),
+  // project：项目 id，'none' 表示未归类
   jobs: (params: {
     page?: number; page_size?: number; status?: string; keyword?: string; mine?: boolean
+    project?: string
   }) => http.get<JobList>('/jobs', { params }).then((r) => r.data),
   job: (id: string) => http.get<Job>(`/jobs/${id}`).then((r) => r.data),
   jobErrors: (id: string, limit = 100, offset = 0) =>
@@ -89,8 +92,18 @@ export const api = {
   jobResults: (id: string, offset = 0, limit = 20, only_errors = false) =>
     http.get<ResultPage>(`/jobs/${id}/results`, { params: { offset, limit, only_errors } })
       .then((r) => r.data),
-  patchJob: (id: string, payload: { name?: string; priority?: number; concurrency?: number }) =>
-    http.patch<Job>(`/jobs/${id}`, payload).then((r) => r.data),
+  // project_id 传 null 表示移出项目
+  patchJob: (id: string, payload: {
+    name?: string; priority?: number; concurrency?: number; project_id?: string | null
+  }) => http.patch<Job>(`/jobs/${id}`, payload).then((r) => r.data),
+  moveJobsToProject: (job_ids: string[], project_id: string | null) =>
+    http.post<{ updated: number }>('/jobs/batch-project', { job_ids, project_id }).then((r) => r.data),
+  // 管理员：置顶 / 取消置顶、查看与调整排队顺序
+  pinJob: (id: string) => http.post<Job>(`/jobs/${id}/pin`).then((r) => r.data),
+  unpinJob: (id: string) => http.post<Job>(`/jobs/${id}/unpin`).then((r) => r.data),
+  queue: (limit = 200) => http.get<QueueView>('/jobs/queue', { params: { limit } }).then((r) => r.data),
+  reorderQueue: (job_ids: string[]) =>
+    http.post<QueueView>('/jobs/queue/reorder', { job_ids }).then((r) => r.data),
   cancelJob: (id: string) => http.post<Job>(`/jobs/${id}/cancel`).then((r) => r.data),
   pauseJob: (id: string) => http.post<Job>(`/jobs/${id}/pause`).then((r) => r.data),
   resumeJob: (id: string) => http.post<Job>(`/jobs/${id}/resume`).then((r) => r.data),
@@ -136,12 +149,21 @@ export const api = {
     http.post<ScriptPreview>('/tools/split-script', config).then((r) => r.data),
 
   // ---------------- 我的 Prompt ----------------
-  prompts: () => http.get<SavedPrompt[]>('/prompts').then((r) => r.data),
+  prompts: (project?: string) =>
+    http.get<SavedPrompt[]>('/prompts', { params: { project } }).then((r) => r.data),
   createPrompt: (payload: SavedPromptInput) =>
     http.post<SavedPrompt>('/prompts', payload).then((r) => r.data),
   updatePrompt: (id: string, payload: Partial<SavedPromptInput>) =>
     http.patch<SavedPrompt>(`/prompts/${id}`, payload).then((r) => r.data),
   deletePrompt: (id: string) => http.delete(`/prompts/${id}`),
+
+  // ---------------- 项目 ----------------
+  projects: () => http.get<Project[]>('/projects').then((r) => r.data),
+  createProject: (payload: { name: string; description?: string | null }) =>
+    http.post<Project>('/projects', payload).then((r) => r.data),
+  updateProject: (id: string, payload: { name?: string; description?: string | null }) =>
+    http.patch<Project>(`/projects/${id}`, payload).then((r) => r.data),
+  deleteProject: (id: string) => http.delete(`/projects/${id}`),
 
   userUsage: () =>
     http.get<Array<{

@@ -115,6 +115,11 @@ export interface Job {
   model_config_id?: string | null
   model_display_name?: string | null
   model_source: ModelSource
+  project_id?: string | null
+  project_name?: string | null
+  /** 管理员置顶：排在队首，运行期间同模型的其他任务让出 */
+  pinned: boolean
+  pinned_at?: string | null
   input_filename: string
   input_size: number
   result_size: number
@@ -313,6 +318,7 @@ export interface SavedPromptInput {
   system_prompt?: string | null
   prompt_template: string
   variables: ScriptVariable[]
+  project_id?: string | null
 }
 
 export interface SavedPrompt extends SavedPromptInput {
@@ -371,4 +377,24 @@ export interface DryRunResult {
   usage: Record<string, number>
   error?: string | null
   response?: Record<string, unknown> | null
+}
+
+/** 项目：把任务和 Prompt 归到一起，只对本人可见 */
+export interface Project {
+  id: string
+  name: string
+  description?: string | null
+  job_count: number
+  /** 其中还在排队/运行的 */
+  active_job_count: number
+  prompt_count: number
+  created_at: string
+  updated_at: string
+}
+
+/** 管理员看的队列：置顶任务 + 按领取顺序排好的排队任务 */
+export interface QueueView {
+  pinned: Job[]
+  queued: Job[]
+  total_queued: number
 }

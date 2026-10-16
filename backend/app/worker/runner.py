@@ -18,6 +18,7 @@ from ..services.gateway import build_personal_config
 from ..services.inference import InferenceClient, InferenceError, build_request_body
 from ..services.jsonl import JsonlError, iter_items
 from ..services.notifications import notify_job
+from ..services.pins import blocked_by_pin
 from ..services.queue import queue
 from ..services.settings_store import read_runtime
 
@@ -64,6 +65,17 @@ class JobRunner:
         if mc is None or not mc.enabled:
             await self._fail_job(load_error or "模型配置不存在或已被禁用")
             return JobStatus.failed
+
+        # 领取和置顶几乎同时发生时，领取那一刻可能还没看到置顶 —— 开跑前再确认一次，
+        # 被挡住就原样交回，由 worker 放回队列
+        if await self._blocked_by_pin():
+            log.info("任务 %s 的模型被置顶任务占用，交回队列", self.job_id)
+            async with session_scope() as db:
+                await db.execute(
+                    update(Job).where(Job.id == self.job_id)
+                    .values(status=JobStatus.queued, worker_id=None)
+                )
+            return JobStatus.queued
 
         input_file = Path(job.input_path)
         if not input_file.exists():
@@ -265,8 +277,23 @@ class JobRunner:
                 elif signal == "pause":
                     self._stop_status = JobStatus.paused
                     stop_event.set()
+                elif signal == "requeue":
+                    # 置顶任务要独占这个模型。先确认置顶还在（可能刚被取消），过时的信号直接丢掉
+                    if await self._blocked_by_pin():
+                        self._stop_status = JobStatus.queued
+                        stop_event.set()
+                    else:
+                        await queue.clear_signal(self.job_id)
         except asyncio.CancelledError:
             pass
+
+    async def _blocked_by_pin(self) -> bool:
+        try:
+            async with session_scope() as db:
+                return await blocked_by_pin(db, self.job_id)
+        except Exception as exc:  # noqa: BLE001 — 查不到就照常跑，不能因此把任务卡住
+            log.warning("任务 %s 检查置顶失败: %s", self.job_id, exc)
+            return False
 
     # ------------------------------------------------------------------ #
     async def _load(self) -> tuple[Job | None, ModelConfig | None, str | None]:
@@ -330,7 +357,7 @@ class JobRunner:
                 .where(Job.id == self.job_id)
                 .values(
                     status=JobStatus.failed, error=message[:2000],
-                    finished_at=datetime.now(UTC),
+                    finished_at=datetime.now(UTC), pinned=False,
                 )
             )
         await queue.clear_signal(self.job_id)
@@ -349,18 +376,22 @@ class JobRunner:
         }
         if status in {JobStatus.succeeded, JobStatus.completed, JobStatus.canceled}:
             values["finished_at"] = datetime.now(UTC)
-        if status == JobStatus.paused:
+            # 置顶只管到任务结束；之后重试失败条目就是普通任务了
+            values["pinned"] = False
+        if status in {JobStatus.paused, JobStatus.queued}:
             values["worker_id"] = None
 
         async with session_scope() as db:
             await db.execute(update(Job).where(Job.id == self.job_id).values(**values))
 
         await queue.set_progress(self.job_id, self.completed, self.failed)
-        await queue.clear_signal(self.job_id)
+        if status != JobStatus.queued:
+            # 让出的任务由 worker 在释放租约后处理信号（见 requeue_preempted）
+            await queue.clear_signal(self.job_id)
         log.info(
             "任务 %s 结束：status=%s 成功=%d 失败=%d",
             self.job_id, status.value, self.completed, self.failed,
         )
-        # 暂停只是中途停下，不发通知
-        if status != JobStatus.paused:
+        # 暂停、让给置顶任务都只是中途停下，不发通知
+        if status not in {JobStatus.paused, JobStatus.queued}:
             await notify_job(self.job_id)

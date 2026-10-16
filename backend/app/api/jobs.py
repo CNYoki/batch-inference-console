@@ -22,16 +22,21 @@ from ..core.security import decrypt_secret, encrypt_secret
 from ..models import (
     DOWNLOADABLE_STATUSES,
     MODEL_EDITABLE_STATUSES,
+    PIN_BLOCKING_STATUSES,
     TERMINAL_STATUSES,
+    AuditLog,
     Job,
     JobError,
     JobStatus,
     ModelConfig,
     ModelSource,
+    Project,
     User,
     UserRole,
 )
 from ..schemas import (
+    JobBatchProject,
+    JobBatchProjectOut,
     JobCreate,
     JobDryRun,
     JobDryRunOut,
@@ -43,12 +48,15 @@ from ..schemas import (
     JobPatch,
     ModelSelection,
     PauseAllOut,
+    QueueOut,
+    QueueReorder,
     UploadValidateOut,
 )
 from ..services import jsonl as jsonl_svc
 from ..services import results as results_svc
 from ..services.gateway import GatewayError, build_personal_config, fetch_models
 from ..services.inference import InferenceClient, build_request_body, resolve_params
+from ..services.pins import as_timestamp, enqueue_job, preempt_for
 from ..services.queue import queue
 from ..services.settings_store import read_runtime
 from ..services.storage import QUOTA_MESSAGE, check_before_upload
@@ -73,13 +81,25 @@ def _can_access(user: User, job: Job) -> bool:
 async def _get_job_or_404(db: DB, user: User, job_id: str) -> Job:
     job = (
         await db.execute(
-            select(Job).options(selectinload(Job.model_config), selectinload(Job.user)).where(Job.id == job_id)
+            select(Job)
+            .options(selectinload(Job.model_config), selectinload(Job.user), selectinload(Job.project))
+            .where(Job.id == job_id)
         )
     ).scalar_one_or_none()
     if job is None or not _can_access(user, job):
         # 无权访问也返回 404，不泄露任务是否存在
         raise HTTPException(status.HTTP_404_NOT_FOUND, "任务不存在")
     return job
+
+
+async def _check_project(db: DB, owner_id: str, project_id: str | None) -> str | None:
+    """项目只能是任务提交者本人的；管理员替别人归类也只能挪进对方自己的项目。"""
+    if not project_id:
+        return None
+    project = await db.get(Project, project_id)
+    if project is None or project.user_id != owner_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "项目不存在")
+    return project.id
 
 
 def _to_out(job: Job, queue_position: int | None = None, live: dict[str, str] | None = None) -> JobOut:
@@ -102,6 +122,10 @@ def _to_out(job: Job, queue_position: int | None = None, live: dict[str, str] | 
         username=job.user.username if job.user else None,
         model_config_id=job.model_config_id,
         model_source=job.model_source.value,
+        project_id=job.project_id,
+        project_name=job.project.name if job.project_id and job.project else None,
+        pinned=job.pinned,
+        pinned_at=job.pinned_at,
         model_display_name=(
             job.personal_model_name
             if job.model_source == ModelSource.personal
@@ -230,6 +254,8 @@ async def create_job(payload: JobCreate, user: CurrentUser, db: DB) -> JobOut:
                 f"你同时进行中的任务已达上限 {user.max_concurrent_jobs}",
             )
 
+    project_id = await _check_project(db, user.id, payload.project_id)
+
     validation = jsonl_svc.validate_file(src, settings.max_items_per_job)
     if validation.errors:
         raise HTTPException(
@@ -252,6 +278,7 @@ async def create_job(payload: JobCreate, user: CurrentUser, db: DB) -> JobOut:
         model_config_id=None if personal else mc.id,
         model_source=ModelSource.personal if personal else ModelSource.shared,
         personal_model_name=payload.personal_model if personal else None,
+        project_id=project_id,
         status=JobStatus.queued,
         priority=priority,
         params=payload.params.model_dump(exclude_none=True),
@@ -267,7 +294,7 @@ async def create_job(payload: JobCreate, user: CurrentUser, db: DB) -> JobOut:
     await db.commit()
 
     try:
-        await queue.enqueue(job.id, job.priority)
+        await enqueue_job(queue, job)
     except Exception as exc:
         log.exception("任务 %s 入队失败", job.id)
         job.status = JobStatus.failed
@@ -275,7 +302,7 @@ async def create_job(payload: JobCreate, user: CurrentUser, db: DB) -> JobOut:
         await db.commit()
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(job.error)) from exc
 
-    await db.refresh(job, ["user", "model_config"])
+    await db.refresh(job, ["user", "model_config", "project"])
     return _to_out(job, await queue.queued_position(job.id))
 
 
@@ -402,8 +429,11 @@ async def list_jobs(
     status_filter: str | None = Query(None, alias="status"),
     keyword: str | None = None,
     mine: bool = True,
+    project: str | None = Query(None, description="项目 id；none 表示未归类的任务"),
 ) -> JobListOut:
-    stmt = select(Job).options(selectinload(Job.model_config), selectinload(Job.user))
+    stmt = select(Job).options(
+        selectinload(Job.model_config), selectinload(Job.user), selectinload(Job.project)
+    )
     count_stmt = select(func.count(Job.id))
 
     if user.role != UserRole.admin or mine:
@@ -421,6 +451,10 @@ async def list_jobs(
         like = f"%{keyword}%"
         stmt = stmt.where(Job.name.like(like))
         count_stmt = count_stmt.where(Job.name.like(like))
+    if project:
+        cond = Job.project_id.is_(None) if project == "none" else Job.project_id == project
+        stmt = stmt.where(cond)
+        count_stmt = count_stmt.where(cond)
 
     total = (await db.execute(count_stmt)).scalar_one()
     rows = (
@@ -457,6 +491,124 @@ async def _safe_position(job_id: str) -> int | None:
         return await queue.queued_position(job_id)
     except Exception:  # noqa: BLE001
         return None
+
+
+# --------------------------------------------------------------------------- #
+# 管理员：队列排序与置顶
+# --------------------------------------------------------------------------- #
+QUEUE_VIEW_LIMIT = 500
+
+
+def _audit(db: DB, admin: User, action: str, target: str | None, detail: dict) -> None:
+    db.add(AuditLog(user_id=admin.id, username=admin.username, action=action, target=target, detail=detail))
+
+
+@router.get("/queue", response_model=QueueOut)
+async def get_queue(_: CurrentAdmin, db: DB, limit: int = Query(200, ge=1, le=QUEUE_VIEW_LIMIT)) -> QueueOut:
+    """置顶任务 + 按领取顺序排好的排队任务（前 limit 个）。"""
+    return await _queue_view(db, limit)
+
+
+async def _queue_view(db: DB, limit: int) -> QueueOut:
+    opts = (selectinload(Job.model_config), selectinload(Job.user), selectinload(Job.project))
+    # 置顶任务连同暂停中的一起列出：暂停期间不占模型，但管理员得知道它还挂着置顶
+    pinned = (
+        await db.execute(
+            select(Job).options(*opts)
+            .where(Job.pinned.is_(True), Job.status.in_([*PIN_BLOCKING_STATUSES, JobStatus.paused]))
+            .order_by(Job.pinned_at)
+        )
+    ).scalars().all()
+
+    order = await queue.peek(0, limit)
+    rows = {
+        j.id: j for j in (
+            await db.execute(select(Job).options(*opts).where(Job.id.in_(order)))
+        ).scalars().all()
+    } if order else {}
+    pinned_ids = {j.id for j in pinned}
+    positions = {jid: i + 1 for i, jid in enumerate(order)}
+    live = await _safe_progress_many([j.id for j in pinned if j.status == JobStatus.running])
+
+    return QueueOut(
+        pinned=[_to_out(j, positions.get(j.id), live.get(j.id)) for j in pinned],
+        queued=[
+            _to_out(rows[jid], positions[jid])
+            for jid in order if jid in rows and jid not in pinned_ids
+        ],
+        total_queued=await queue.queued_count(),
+    )
+
+
+@router.post("/queue/reorder", response_model=QueueOut)
+async def reorder_queue(payload: QueueReorder, admin: CurrentAdmin, db: DB) -> QueueOut:
+    """按给定先后重排排队中的任务。只在列出的任务之间调换，没列出的位置不变。"""
+    jobs = {
+        j.id: j for j in (
+            await db.execute(select(Job).where(Job.id.in_(payload.job_ids)))
+        ).scalars().all()
+    }
+    for jid in payload.job_ids:
+        job = jobs.get(jid)
+        if job is None or job.status != JobStatus.queued:
+            raise HTTPException(status.HTTP_409_CONFLICT, "队列已经变化（有任务开始运行或被取消），请刷新后重试")
+        if job.pinned:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "置顶任务固定在队首，不参与排序")
+
+    try:
+        scores = await queue.reorder(payload.job_ids)
+    except KeyError as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "队列已经变化（有任务开始运行或被取消），请刷新后重试"
+        ) from exc
+
+    # 优先级跟着新位置走，之后改优先级、被置顶任务挤回队列时仍大致保持这个顺序
+    for jid, score in scores.items():
+        jobs[jid].priority = queue.priority_of(score)
+    _audit(db, admin, "queue_reorder", None, {"job_ids": payload.job_ids[:50], "count": len(payload.job_ids)})
+    await db.commit()
+    return await _queue_view(db, max(200, len(payload.job_ids)))
+
+
+@router.post("/{job_id}/pin", response_model=JobOut)
+async def pin_job(job_id: str, admin: CurrentAdmin, db: DB) -> JobOut:
+    """置顶：排到队首，同模型正在跑的其他任务让出来回到队列，等它结束后再继续。"""
+    job = await _get_job_or_404(db, admin, job_id)
+    if job.status not in {JobStatus.queued, JobStatus.running, JobStatus.paused}:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "只有排队中、运行中或已暂停的任务可以置顶")
+    if not job.pinned:
+        job.pinned = True
+        job.pinned_at = datetime.now(UTC)
+    _audit(db, admin, "job_pin", job.id, {"name": job.name})
+    await db.commit()
+
+    if job.status == JobStatus.queued:
+        await queue.rescore(job.id, job.priority, pinned=True, ts=as_timestamp(job.pinned_at))
+    if job.status in PIN_BLOCKING_STATUSES:
+        await preempt_for(db, queue, job.id)
+
+    await db.refresh(job, ["user", "model_config", "project"])
+    position = await _safe_position(job.id) if job.status == JobStatus.queued else None
+    return _to_out(job, position)
+
+
+@router.post("/{job_id}/unpin", response_model=JobOut)
+async def unpin_job(job_id: str, admin: CurrentAdmin, db: DB) -> JobOut:
+    """取消置顶：回到按优先级排队，被它挤回队列的任务随即可以继续被领取。"""
+    job = await _get_job_or_404(db, admin, job_id)
+    if not job.pinned:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "该任务没有置顶")
+    job.pinned = False
+    job.pinned_at = None
+    _audit(db, admin, "job_unpin", job.id, {"name": job.name})
+    await db.commit()
+
+    if job.status == JobStatus.queued:
+        await queue.rescore(job.id, job.priority, ts=as_timestamp(job.queued_at))
+
+    await db.refresh(job, ["user", "model_config", "project"])
+    position = await _safe_position(job.id) if job.status == JobStatus.queued else None
+    return _to_out(job, position)
 
 
 @router.get("/{job_id}", response_model=JobOut)
@@ -565,6 +717,9 @@ async def download_input(job_id: str, user: CurrentUser, db: DB) -> StreamingRes
 async def patch_job(job_id: str, payload: JobPatch, user: CurrentUser, db: DB) -> JobOut:
     job = await _get_job_or_404(db, user, job_id)
     data = payload.model_dump(exclude_unset=True, exclude_none=True)
+    # project_id 显式传 null 表示移出项目，不能跟着 exclude_none 一起丢掉
+    if "project_id" in payload.model_fields_set:
+        data["project_id"] = await _check_project(db, job.user_id, payload.project_id)
 
     if "priority" in data and job.status != JobStatus.queued:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "只有排队中的任务可以调整优先级")
@@ -574,12 +729,25 @@ async def patch_job(job_id: str, payload: JobPatch, user: CurrentUser, db: DB) -
     await db.commit()
 
     if "priority" in data:
-        # 重新入队以刷新排序分值
+        # 重新入队以刷新排序分值（置顶任务不看优先级，位置不变）
         await queue.remove(job.id)
-        await queue.enqueue(job.id, job.priority)
+        await enqueue_job(queue, job)
 
-    await db.refresh(job, ["user", "model_config"])
+    await db.refresh(job, ["user", "model_config", "project"])
     return _to_out(job, await _safe_position(job.id))
+
+
+@router.post("/batch-project", response_model=JobBatchProjectOut)
+async def move_jobs_to_project(payload: JobBatchProject, user: CurrentUser, db: DB) -> JobBatchProjectOut:
+    """把自己的一批任务挪进某个项目；project_id 为空表示移出项目。"""
+    project_id = await _check_project(db, user.id, payload.project_id)
+    jobs = (
+        await db.execute(select(Job).where(Job.id.in_(payload.job_ids), Job.user_id == user.id))
+    ).scalars().all()
+    for job in jobs:
+        job.project_id = project_id
+    await db.commit()
+    return JobBatchProjectOut(updated=len(jobs))
 
 
 async def _worker_gone(worker_id: str | None) -> bool:
@@ -611,6 +779,7 @@ async def _settle_orphan(job: Job, new_status: JobStatus) -> None:
     job.worker_id = None
     if new_status == JobStatus.canceled:
         job.finished_at = datetime.now(UTC)
+        job.pinned = False
 
 
 @router.post("/{job_id}/cancel", response_model=JobOut)
@@ -631,10 +800,11 @@ async def cancel_job(job_id: str, user: CurrentUser, db: DB) -> JobOut:
         # 排队中的任务不会有 worker 来响应信号，这里直接落终态
         job.status = JobStatus.canceled
         job.finished_at = datetime.now(UTC)
+        job.pinned = False
         await db.commit()
         await queue.clear_signal(job.id)
 
-    await db.refresh(job, ["user", "model_config"])
+    await db.refresh(job, ["user", "model_config", "project"])
     return _to_out(job)
 
 
@@ -693,7 +863,7 @@ async def pause_job(job_id: str, user: CurrentUser, db: DB) -> JobOut:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "只有排队中或运行中的任务可以暂停")
     await _pause(job, db)
 
-    await db.refresh(job, ["user", "model_config"])
+    await db.refresh(job, ["user", "model_config", "project"])
     return _to_out(job)
 
 
@@ -714,9 +884,12 @@ async def resume_job(job_id: str, user: CurrentUser, db: DB) -> JobOut:
     job.finished_at = None
     job.queued_at = datetime.now(UTC)
     await db.commit()
-    await queue.enqueue(job.id, job.priority)
+    await enqueue_job(queue, job)
+    if job.pinned:
+        # 置顶任务暂停期间别的任务用上了这个模型，恢复时重新抢占
+        await preempt_for(db, queue, job.id)
 
-    await db.refresh(job, ["user", "model_config"])
+    await db.refresh(job, ["user", "model_config", "project"])
     return _to_out(job, await _safe_position(job.id))
 
 
@@ -763,7 +936,7 @@ async def change_model(job_id: str, payload: JobModelChange, user: CurrentUser, 
         job.concurrency = min(job.concurrency, mc.max_concurrency)
     await db.commit()
 
-    await db.refresh(job, ["user", "model_config"])
+    await db.refresh(job, ["user", "model_config", "project"])
     return _to_out(job)
 
 
@@ -791,9 +964,9 @@ async def retry_failed(job_id: str, user: CurrentUser, db: DB) -> JobOut:
     await db.commit()
 
     await queue.clear_signal(job.id)
-    await queue.enqueue(job.id, job.priority)
+    await enqueue_job(queue, job)
 
-    await db.refresh(job, ["user", "model_config"])
+    await db.refresh(job, ["user", "model_config", "project"])
     return _to_out(job, await _safe_position(job.id))
 
 

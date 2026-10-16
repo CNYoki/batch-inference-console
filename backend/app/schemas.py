@@ -324,6 +324,10 @@ class JobOut(BaseModel):
     model_config_id: str | None = None
     model_display_name: str | None = None
     model_source: str = "shared"
+    project_id: str | None = None
+    project_name: str | None = None
+    pinned: bool = False
+    pinned_at: datetime | None = None
 
     input_filename: str
     input_size: int
@@ -421,6 +425,8 @@ class JobCreate(JobSubmission):
     name: str = Field(min_length=1, max_length=255)
     concurrency: int = Field(default=0, ge=0, le=512)
     priority: int = Field(default=100, ge=0, le=1000)
+    # 归到哪个项目；必须是提交者自己的项目
+    project_id: str | None = Field(default=None, max_length=32)
 
 
 class JobDryRun(JobSubmission):
@@ -460,6 +466,43 @@ class JobPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     priority: int | None = Field(default=None, ge=0, le=1000)
     concurrency: int | None = Field(default=None, ge=0, le=512)
+    # 传 null 表示移出项目；不传表示不改。只能挪到任务提交者自己的项目里
+    project_id: str | None = Field(default=None, max_length=32)
+
+
+class JobBatchProject(BaseModel):
+    """把一批任务一起挪进（或移出）某个项目。"""
+
+    job_ids: list[str] = Field(min_length=1, max_length=500)
+    project_id: str | None = Field(default=None, max_length=32)
+
+
+class JobBatchProjectOut(BaseModel):
+    updated: int
+
+
+class QueueReorder(BaseModel):
+    """管理员调整排队顺序：按期望的先后列出排队中的任务。
+
+    只调换这些任务彼此之间的先后，不影响没列出来的任务；置顶任务不参与排序。
+    """
+
+    job_ids: list[str] = Field(min_length=1, max_length=2000)
+
+    @field_validator("job_ids")
+    @classmethod
+    def _unique(cls, v: list[str]) -> list[str]:
+        if len(set(v)) != len(v):
+            raise ValueError("任务列表里有重复")
+        return v
+
+
+class QueueOut(BaseModel):
+    """管理员看的队列：置顶任务 + 按领取顺序排好的排队任务。"""
+
+    pinned: list[JobOut]
+    queued: list[JobOut]
+    total_queued: int
 
 
 # --------------------------------------------------------------------------- #
@@ -547,6 +590,7 @@ class PromptBase(BaseModel):
     system_prompt: str | None = Field(default=None, max_length=20000)
     prompt_template: str = Field(min_length=1, max_length=50000)
     variables: list[ScriptVariable] = Field(default_factory=list, max_length=50)
+    project_id: str | None = Field(default=None, max_length=32)
 
     @field_validator("name")
     @classmethod
@@ -571,6 +615,8 @@ class PromptUpdate(BaseModel):
     system_prompt: str | None = Field(default=None, max_length=20000)
     prompt_template: str | None = Field(default=None, min_length=1, max_length=50000)
     variables: list[ScriptVariable] | None = Field(default=None, max_length=50)
+    # 传 null 表示移出项目
+    project_id: str | None = Field(default=None, max_length=32)
 
     @field_validator("name")
     @classmethod
@@ -587,6 +633,53 @@ class PromptOut(PromptBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+# --------------------------------------------------------------------------- #
+# 项目
+# --------------------------------------------------------------------------- #
+class ProjectCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=1024)
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("项目名称不能为空")
+        return v
+
+
+class ProjectUpdate(BaseModel):
+    """description 传 null 表示清空；name 传 null 视为不改。"""
+
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=1024)
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            raise ValueError("项目名称不能为空")
+        return v
+
+
+class ProjectOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    description: str | None = None
+    job_count: int = 0
+    # 其中还在排队/运行的
+    active_job_count: int = 0
+    prompt_count: int = 0
     created_at: datetime
     updated_at: datetime
 

@@ -6,13 +6,15 @@ import {
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import {
-  ArrowLeftOutlined, DeleteOutlined, DownloadOutlined, PauseCircleOutlined,
-  PlayCircleOutlined, ReloadOutlined, StopOutlined, SwapOutlined,
+  ArrowLeftOutlined, DeleteOutlined, DownloadOutlined, FolderOutlined, PauseCircleOutlined,
+  PlayCircleOutlined, PushpinFilled, PushpinOutlined, ReloadOutlined, StopOutlined, SwapOutlined,
 } from '@ant-design/icons'
 import { api, downloadUrl } from '../api'
 import type { Job, JobErrorRow, ResultRow } from '../api'
 import ChangeModelModal from '../components/ChangeModelModal'
 import JobStatusTag from '../components/JobStatusTag'
+import MoveToProjectModal from '../components/MoveToProjectModal'
+import { useAuth } from '../hooks/useAuth'
 import { usePolling } from '../hooks/usePolling'
 import { ACTIVE_STATUSES, formatBytes, formatDateTime, formatDuration, formatNumber } from '../utils'
 
@@ -21,6 +23,8 @@ export default function JobDetailPage() {
   const navigate = useNavigate()
   const location = useLocation()
   const { modal, message } = App.useApp()
+  const { isAdmin, user } = useAuth()
+  const [moving, setMoving] = useState(false)
   // 从列表点进来时带着列表的页码与筛选条件，返回时原样回去；直接打开链接则回第一页
   const listUrl = `/jobs${(location.state as { from?: string } | null)?.from ?? ''}`
 
@@ -80,6 +84,7 @@ export default function JobDetailPage() {
   // 中途导出会拿到不完整甚至截断的内容
   const canDownload =
     ['succeeded', 'completed', 'canceled'].includes(job.status) && !purged && hasResults
+  const canPin = isAdmin && !job.pinned && ['queued', 'running', 'paused'].includes(job.status)
 
   const resultColumns: ColumnsType<ResultRow> = [
     { title: 'custom_id', dataIndex: 'custom_id', width: 160, ellipsis: true,
@@ -111,6 +116,15 @@ export default function JobDetailPage() {
               <Typography.Title level={4} style={{ margin: 0 }}>{job.name}</Typography.Title>
               <JobStatusTag status={job.status} />
               {job.queue_position ? <Tag>队列第 {job.queue_position} 位</Tag> : null}
+              {job.pinned && (
+                <Tag color="volcano" icon={<PushpinFilled />}>
+                  {job.status === 'paused' ? '已置顶（暂停中不占用模型）' : '已置顶'}
+                </Tag>
+              )}
+              {job.project_name && (
+                <Tag icon={<FolderOutlined />} style={{ cursor: 'pointer' }}
+                  onClick={() => navigate(`/jobs?project=${job.project_id}`)}>{job.project_name}</Tag>
+              )}
             </Space>
           </Col>
           <Col>
@@ -139,6 +153,22 @@ export default function JobDetailPage() {
                 >
                   <Button type="primary" icon={<DownloadOutlined />}>下载结果</Button>
                 </Dropdown>
+              )}
+              {canPin && (
+                <Button icon={<PushpinOutlined />} onClick={() => modal.confirm({
+                  title: '置顶该任务？',
+                  content: '置顶后它排到队首；同一模型上正在运行的其他任务会暂停下来回到队列，'
+                    + '直到它完成、失败或被取消后才继续（已完成的条目不会重跑）。',
+                  okText: '置顶', cancelText: '取消',
+                  onOk: () => act(() => api.pinJob(job.id), '已置顶'),
+                })}>置顶</Button>
+              )}
+              {isAdmin && job.pinned && (
+                <Button icon={<PushpinOutlined />}
+                  onClick={() => void act(() => api.unpinJob(job.id), '已取消置顶')}>取消置顶</Button>
+              )}
+              {job.user_id === user?.id && (
+                <Button icon={<FolderOutlined />} onClick={() => setMoving(true)}>归入项目</Button>
               )}
               {(job.status === 'running' || job.status === 'queued') && (
                 <Button icon={<PauseCircleOutlined />}
@@ -251,6 +281,7 @@ export default function JobDetailPage() {
                 <Descriptions bordered column={{ xs: 1, sm: 2 }} size="small">
                   <Descriptions.Item label="任务 ID"><span className="mono">{job.id}</span></Descriptions.Item>
                   <Descriptions.Item label="提交者">{job.username ?? '—'}</Descriptions.Item>
+                  <Descriptions.Item label="所属项目">{job.project_name ?? '未归类'}</Descriptions.Item>
                   <Descriptions.Item label="模型">
                     <Space size={4}>
                       <Tag color={job.model_source === 'shared' ? 'blue' : 'default'}>
@@ -262,7 +293,9 @@ export default function JobDetailPage() {
                     </Space>
                   </Descriptions.Item>
                   <Descriptions.Item label="并发数">{job.concurrency || '按模型配置'}</Descriptions.Item>
-                  <Descriptions.Item label="优先级">{job.priority}</Descriptions.Item>
+                  <Descriptions.Item label="优先级">
+                    {job.priority}{job.pinned ? `（已置顶，${formatDateTime(job.pinned_at)}）` : ''}
+                  </Descriptions.Item>
                   <Descriptions.Item label="执行 worker">
                     <span className="mono">{job.worker_id ?? '—'}</span>
                   </Descriptions.Item>
@@ -292,6 +325,12 @@ export default function JobDetailPage() {
         open={changingModel}
         onClose={() => setChangingModel(false)}
         onChanged={() => void loadJob()}
+      />
+      <MoveToProjectModal
+        jobIds={moving ? [job.id] : []}
+        current={job.project_id}
+        onClose={() => setMoving(false)}
+        onMoved={() => void loadJob()}
       />
     </Space>
   )
