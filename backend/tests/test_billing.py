@@ -49,37 +49,66 @@ class FakeGateway:
         self.calls: list[dict] = []
         self.billing_error: tuple[int, str] | None = None
         self.infer_delay = 0.0
+        self.billing_passthrough = False
+        # (哪个推理接口, Authorization, 请求里的 model)
+        self.inferred: list[tuple[str, str, str]] = []
         self.usage = {"prompt_tokens": 10, "completion_tokens": 5,
                       "prompt_tokens_details": {"cached_tokens": 2}}
 
     async def handler(self, request: httpx.Request) -> httpx.Response:
         url = str(request.url)
+        if url.startswith("http://infer2.test/v1/chat"):
+            # 分模型配置里单独指定的推理接口
+            body = json.loads(request.content)
+            self.inferred.append(("infer2", request.headers["authorization"], body["model"]))
+            return httpx.Response(200, json={
+                "model": body["model"], "choices": [{"message": {"content": "ok"}}], "usage": self.usage,
+            })
         if url.startswith(INFER):
             assert request.headers["authorization"] == "Bearer platform-key"
+            if url.endswith("/chat/completions"):
+                body = json.loads(request.content)
+                self.inferred.append(("infer", request.headers["authorization"], body["model"]))
             if url.endswith("/models"):
                 return httpx.Response(200, json={"data": [{"id": "gw-m"}, {"id": "gw-other"}]})
             if self.infer_delay:
                 await asyncio.sleep(self.infer_delay)
             return httpx.Response(200, json={
+                "model": json.loads(request.content)["model"],
                 "choices": [{"message": {"content": "ok"}}], "usage": self.usage,
             })
         if url == "http://gw.test/v1/models":
             # 拉模型仍是用户 Key 走个人网关
-            assert request.headers["authorization"] == "Bearer sk-batch"
+            assert request.headers["authorization"].startswith("Bearer sk-")
             return httpx.Response(200, json={"data": [{"id": "gw-m"}, {"id": "gw-other"}]})
         if url.startswith("http://gw.test/api/usage/token"):
-            if request.headers["authorization"] != "Bearer sk-batch":
+            # sk-nogroup* 模拟老网关：用量查询不返回 group，只能靠 0 元计费试探
+            group = {"Bearer sk-batch": "batch", "Bearer sk-normal": "default",
+                     "Bearer sk-nogroup": None, "Bearer sk-nogroup-plain": None}
+            auth = request.headers["authorization"]
+            if auth not in group:
                 return httpx.Response(401, json={"success": False, "message": "无效的令牌"})
-            return httpx.Response(200, json={"code": True, "data": {
+            data = {
                 "name": "batch", "total_available": 123456, "unlimited_quota": False,
                 "model_limits_enabled": True, "model_limits": {"gw-m": True},
-            }})
+            }
+            if group[auth]:
+                data["group"] = group[auth]
+            return httpx.Response(200, json={"code": True, "data": data})
         if url == BILL:
-            assert request.headers["authorization"] == "Bearer nap-token"
             body = json.loads(request.content or b"{}")
+            # 透传模式下请求头里是用户自己的 Key
+            expected = f"Bearer {body.get('key')}" if self.billing_passthrough else "Bearer nap-token"
+            assert request.headers["authorization"] == expected
             self.calls.append(body)
             if not body:
                 return httpx.Response(400, json={"success": False, "code": "invalid_request", "message": "缺参数"})
+            if "amount" in body:
+                # 0 元计费：非 batch 的 Key 被拒，batch Key 扣 0 元
+                if body["key"] in ("sk-normal", "sk-nogroup-plain"):
+                    return httpx.Response(403, json={"success": False, "code": "key_not_batch", "message": "非 batch"})
+                return httpx.Response(200, json={"success": True, "data": {
+                    "request_id": body["request_id"], "quota": 0, "billing_source": "wallet", "duplicate": False}})
             if self.billing_error:
                 status_code, code = self.billing_error
                 return httpx.Response(status_code, json={"success": False, "code": code, "message": code})
@@ -595,3 +624,260 @@ async def test_switching_between_gateway_models_bills_each_model_separately(
     async with session_scope() as db:
         (await db.get(User, admin_id)).llm_token_encrypted = None
         await db.delete(await db.get(Job, job_id))
+
+
+# --------------------------------------------------------------------------- #
+# 分模型配置：模型独立计费（单独的推理接口、重定向模型名）
+# --------------------------------------------------------------------------- #
+def _route_runtime(**rule) -> dict:
+    return {
+        **DEFAULTS, **BILLING_RUNTIME,
+        "user_gateway_inference_api_key_encrypted": encrypt_secret("platform-key"),
+        "user_gateway_billing_token_encrypted": encrypt_secret("nap-token"),
+        "user_gateway_reasoning_rules": [{"pattern": "gw-*", "enabled": True, **rule}],
+    }
+
+
+def test_model_route_overrides_and_falls_back():
+    from app.services.gateway import resolve_route
+
+    full = _route_runtime(
+        billing_override=True, inference_base_url="http://infer2.test/v1/",
+        inference_api_key_encrypted=encrypt_secret("model-key"), upstream_model="real-model",
+    )
+    assert resolve_route("gw-m", full, "sk-batch") == ("http://infer2.test/v1", "model-key", "real-model")
+    # 没命中规则的模型走全局推理接口
+    assert resolve_route("other", full, "sk-batch") == (INFER, "platform-key", "other")
+    # 留空的项各自退回全局
+    partial = _route_runtime(billing_override=True, upstream_model="real-model")
+    assert resolve_route("gw-m", partial, "sk-batch") == (INFER, "platform-key", "real-model")
+    # 规则没打开「模型独立计费」，或全局独立计费没开，都不看分模型的这几项
+    assert resolve_route("gw-m", {**full, "user_gateway_reasoning_rules": [
+        {**full["user_gateway_reasoning_rules"][0], "billing_override": False}]}, "sk") == (INFER, "platform-key", "gw-m")
+    off = {**full, "user_gateway_billing_enabled": False, "user_gateway_base_url": "http://gw.test/v1"}
+    assert resolve_route("gw-m", off, "sk-user") == ("http://gw.test/v1", "sk-user", "gw-m")
+
+    mc = build_personal_config("gw-m", "sk-batch", full)
+    assert (mc.display_name, mc.model_name, mc.base_url) == ("gw-m", "real-model", "http://infer2.test/v1")
+
+
+@pytest.mark.asyncio
+async def test_rule_keys_are_write_only_and_hidden_from_users(admin_client: AsyncClient):
+    rule = {"pattern": "gw-*", "enabled": True, "billing_override": True,
+            "inference_base_url": "http://infer2.test/v1", "inference_api_key": "model-secret-key",
+            "upstream_model": "real-model"}
+    data = (await admin_client.patch("/api/admin/settings", json={"user_gateway_reasoning_rules": [rule]})).json()
+    [saved] = data["user_gateway_reasoning_rules"]
+    assert saved["id"] and saved["inference_api_key_masked"] == "mode******-key"
+    assert saved["inference_api_key"] is None and saved["upstream_model"] == "real-model"
+
+    # 不传 Key = 保持；按 id 认，调换顺序也不串
+    other = {"pattern": "x-*", "enabled": True}
+    data = (await admin_client.patch("/api/admin/settings", json={"user_gateway_reasoning_rules": [
+        other, {**saved, "inference_api_key": None, "inference_api_key_masked": None},
+    ]})).json()
+    assert [r["inference_api_key_masked"] for r in data["user_gateway_reasoning_rules"]] == [None, "mode******-key"]
+    # 空串 = 清除
+    kept = data["user_gateway_reasoning_rules"][1]
+    data = (await admin_client.patch("/api/admin/settings", json={"user_gateway_reasoning_rules": [
+        {**kept, "inference_api_key": ""}]})).json()
+    assert data["user_gateway_reasoning_rules"][0]["inference_api_key_masked"] is None
+
+    # 普通用户读设置看不到推理接口和重定向模型名
+    await admin_client.patch("/api/admin/settings", json={
+        "user_gateway_reasoning_rules": [rule], "user_gateway_billing_url": BILL,
+        "user_gateway_inference_base_url": INFER,
+    })
+    name = f"ruleuser-{uuid.uuid4().hex[:6]}"
+    await admin_client.post("/api/admin/users", json={"username": name, "password": "UserPass123!", "role": "user"})
+    async with AsyncClient(transport=admin_client._transport, base_url="http://test") as c:
+        login = await c.post("/api/auth/login", json={"username": name, "password": "UserPass123!"})
+        assert login.status_code == 200, login.text
+        public = (await c.get("/api/settings")).json()
+    # 只看值，字段名里本来就有 inference
+    def values(obj):
+        if isinstance(obj, dict):
+            for v in obj.values():
+                yield from values(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                yield from values(v)
+        elif isinstance(obj, str):
+            yield obj
+    leaked = [v for v in values(public) if any(x in v for x in ("real-model", "infer", "gw.test"))]
+    assert leaked == []
+    assert public["user_gateway_reasoning_rules"][0]["pattern"] == "gw-*"
+
+    async with session_scope() as db:
+        await write_runtime(db, {k: DEFAULTS[k] for k in DEFAULTS if k.startswith("user_gateway_")})
+
+
+async def _upload(client: AsyncClient) -> str:
+    content = json.dumps({"custom_id": "a", "body": {"messages": [{"role": "user", "content": "hi"}]}})
+    resp = await client.post("/api/jobs/upload", files={"file": ("in.jsonl", content.encode(), "application/json")})
+    return resp.json()["upload_id"]
+
+
+@pytest.mark.asyncio
+async def test_dry_run_reports_billing_failure_and_hides_upstream_model(
+    admin_client: AsyncClient, gw, billing_runtime,
+):
+    async with session_scope() as db:
+        await write_runtime(db, {"user_gateway_reasoning_rules": [{
+            "id": "r1", "pattern": "gw-*", "enabled": True, "billing_override": True,
+            "inference_base_url": "http://infer2.test/v1",
+            "inference_api_key_encrypted": encrypt_secret("model-key"), "upstream_model": "real-model",
+        }]})
+    body = {"model_source": "personal", "personal_model": "gw-m", "personal_token": "sk-batch",
+            "remember_token": False, "params": {}}
+
+    out = (await admin_client.post("/api/jobs/dry-run", json={**body, "upload_id": await _upload(admin_client)})).json()
+    assert out["ok"] and out["billing_ok"] is True
+    # 推理发到了分模型接口、用的是重定向名；回显给用户的仍是原名
+    assert gw.inferred[-1] == ("infer2", "Bearer model-key", "real-model")
+    assert out["request_body"]["model"] == "gw-m" and out["response"]["model"] == "gw-m"
+    # 计费用的是用户看到的模型名（网关按它定价）
+    assert gw.calls[-1]["model_name"] == "gw-m"
+
+    gw.billing_error = (402, "insufficient_quota")
+    out = (await admin_client.post("/api/jobs/dry-run", json={**body, "upload_id": await _upload(admin_client)})).json()
+    assert out["ok"] and out["billing_ok"] is False and "余额" in out["billing"]
+
+    gw.billing_error = (503, "internal_error")
+    out = (await admin_client.post("/api/jobs/dry-run", json={**body, "upload_id": await _upload(admin_client)})).json()
+    assert out["billing_ok"] is False and "暂时不可用" in out["billing"]
+
+
+# --------------------------------------------------------------------------- #
+# 限制 API Key 添加
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_require_batch_key_rejects_other_groups(admin_client: AsyncClient, gw, billing_runtime):
+    async with session_scope() as db:
+        await write_runtime(db, {"user_gateway_billing_require_batch_key": True})
+
+    ok = await admin_client.post("/api/models/personal", json={"token": "sk-batch", "remember": False})
+    assert ok.status_code == 200 and ok.json()["key"]["group"] == "batch"
+
+    resp = await admin_client.post("/api/models/personal", json={"token": "sk-normal", "remember": True})
+    assert resp.status_code == 400 and "batch 分组" in resp.json()["detail"]
+    # 网关没返回分组时发 0 元计费试探：batch Key 放行，其余拒绝
+    calls_before = len(gw.calls)
+    resp = await admin_client.post("/api/models/personal", json={"token": "sk-nogroup", "remember": False})
+    assert resp.status_code == 200, resp.text
+    probe = gw.calls[calls_before]
+    assert probe["amount"] == "0" and probe["request_id"].startswith("bic-keycheck-")
+    resp = await admin_client.post("/api/models/personal", json={"token": "sk-nogroup-plain", "remember": True})
+    assert resp.status_code == 400 and "batch 分组" in resp.json()["detail"]
+    # 被拒的 Key 不会保存下来
+    me = (await admin_client.get("/api/auth/me")).json()
+    async with session_scope() as db:
+        assert (await db.get(User, me["id"])).llm_token_encrypted is None
+
+    # 开关关着时不检查分组
+    async with session_scope() as db:
+        await write_runtime(db, {"user_gateway_billing_require_batch_key": False})
+    resp = await admin_client.post("/api/models/personal", json={"token": "sk-normal", "remember": False})
+    assert resp.status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# 透传用户 Key、仅单独配置的模型计费
+# --------------------------------------------------------------------------- #
+def test_passthrough_uses_user_key():
+    from app.services.gateway import billing_auth, billing_endpoint_error, resolve_route
+
+    runtime = {**DEFAULTS, **BILLING_RUNTIME,
+               "user_gateway_inference_key_passthrough": True, "user_gateway_billing_key_passthrough": True}
+    assert resolve_route("gw-m", runtime, "sk-user")[1] == "sk-user"
+    assert billing_auth(runtime, "sk-user") == "sk-user"
+    # 透传时不要求平台的访问令牌
+    assert billing_endpoint_error(runtime) is None
+    assert billing_config_error_for(runtime, "gw-m") is None
+
+    # 分模型配置也能单独透传
+    rule_runtime = _route_runtime(billing_override=True, inference_base_url="http://infer2.test/v1",
+                                  inference_key_passthrough=True)
+    assert resolve_route("gw-m", rule_runtime, "sk-user") == ("http://infer2.test/v1", "sk-user", "gw-m")
+
+
+def billing_config_error_for(runtime: dict, model: str):
+    from app.services.gateway import billing_config_error
+
+    return billing_config_error(runtime, model)
+
+
+def test_only_matched_models_are_billed():
+    from app.services.gateway import billing_applies
+
+    runtime = _route_runtime(billing_override=True)
+    assert billing_applies("gw-m", runtime) and billing_applies("other", runtime)
+    only = {**runtime, "user_gateway_billing_only_matched": True}
+    assert billing_applies("gw-m", only)
+    # 没命中、或命中了但没打开「模型独立计费」的都不计费
+    assert not billing_applies("other", only)
+    assert not billing_applies("gw-m", {**only, "user_gateway_reasoning_rules": [
+        {"pattern": "gw-*", "billing_override": False}]})
+    # 不计费的模型不要求计费接口配齐
+    assert billing_config_error_for({**only, "user_gateway_billing_url": ""}, "other") is None
+    assert billing_config_error_for({**only, "user_gateway_billing_url": ""}, "gw-m")
+
+
+@pytest.mark.asyncio
+async def test_runner_skips_billing_for_unmatched_model(gw, billing_runtime, bill_user, redis_ok):
+    from app.worker.runner import JobRunner
+
+    async with session_scope() as db:
+        await write_runtime(db, {
+            "user_gateway_billing_only_matched": True,
+            "user_gateway_reasoning_rules": [{"pattern": "gw-other", "billing_override": True}],
+        })
+    job_id = await _job(bill_user, input_path=_input(3), total_items=3)
+    assert await JobRunner(job_id, "w-test").run() == JobStatus.succeeded
+    job = await _get(job_id)
+    assert not job.billing_enabled and job.prompt_tokens == 30
+    assert await _records(job_id) == [] and gw.calls == []
+
+
+@pytest.mark.asyncio
+async def test_runner_bills_with_passthrough_key(gw, billing_runtime, bill_user, redis_ok):
+    from app.worker.runner import JobRunner
+
+    gw.billing_passthrough = True
+    async with session_scope() as db:
+        await write_runtime(db, {"user_gateway_billing_key_passthrough": True,
+                                 "user_gateway_billing_token_encrypted": ""})
+    job_id = await _job(bill_user, input_path=_input(2), total_items=2, billing_enabled=False)
+    assert await JobRunner(job_id, "w-test").run() == JobStatus.succeeded
+    [record] = await _records(job_id)
+    assert record.status == BillingStatus.succeeded and gw.calls[-1]["key"] == "sk-batch"
+
+
+
+def test_passthrough_requests_carry_batch_marker():
+    from app.services.inference import build_request_body
+
+    runtime = {**DEFAULTS, **BILLING_RUNTIME, "user_gateway_inference_key_passthrough": True}
+    mc = build_personal_config("gw-m", "sk-user", runtime)
+    body = build_request_body(mc, {"messages": [], "batch": False}, {}, None)
+    # 默认标识 {"batch": true}，用户数据里的同名字段盖不掉
+    assert body["batch"] is True
+
+    custom = {**runtime, "user_gateway_passthrough_marker": {"x_source": "batch", "batch": True}}
+    body = build_request_body(build_personal_config("gw-m", "sk-user", custom), {"messages": []}, {}, None)
+    assert body["x_source"] == "batch" and body["batch"] is True
+
+    # 用平台 Key 时不带
+    platform = {**runtime, "user_gateway_inference_key_passthrough": False,
+                "user_gateway_inference_api_key_encrypted": encrypt_secret("platform-key")}
+    assert "batch" not in build_request_body(build_personal_config("gw-m", "sk-user", platform), {"messages": []}, {}, None)
+
+    # 分模型配置：单独设了 Key 的不带，单独透传的带
+    own_key = _route_runtime(billing_override=True, inference_api_key_encrypted=encrypt_secret("model-key"))
+    own_key["user_gateway_inference_key_passthrough"] = True
+    assert "batch" not in build_request_body(build_personal_config("gw-m", "sk", own_key), {"messages": []}, {}, None)
+    rule_pt = _route_runtime(billing_override=True, inference_key_passthrough=True)
+    assert build_request_body(build_personal_config("gw-m", "sk", rule_pt), {"messages": []}, {}, None)["batch"] is True
+    # 直连模式（没开独立计费）不带
+    direct = {**DEFAULTS, "user_gateway_base_url": "http://gw.test/v1"}
+    assert "batch" not in build_request_body(build_personal_config("gw-m", "sk", direct), {"messages": []}, {}, None)

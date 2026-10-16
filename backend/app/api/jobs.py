@@ -58,7 +58,14 @@ from ..schemas import (
 from ..services import billing
 from ..services import jsonl as jsonl_svc
 from ..services import results as results_svc
-from ..services.gateway import GatewayError, billing_mode, build_personal_config, list_user_models
+from ..services.gateway import (
+    GatewayError,
+    billing_applies,
+    billing_config_error,
+    billing_mode,
+    build_personal_config,
+    list_user_models,
+)
 from ..services.inference import InferenceClient, build_request_body, resolve_params
 from ..services.pins import as_timestamp, enqueue_job, preempt_for
 from ..services.projects import ensure_default_project
@@ -300,7 +307,7 @@ async def create_job(payload: JobCreate, user: CurrentUser, db: DB) -> JobOut:
         total_items=validation.total,
         queued_at=datetime.now(UTC),
         # 只是先标上给前端看；worker 每次开跑时会按当时的设置再定一次
-        billing_enabled=personal and runtime.user_gateway_billing_enabled,
+        billing_enabled=personal and billing_applies(payload.personal_model or "", await read_runtime(db)),
     )
     db.add(job)
     await db.commit()
@@ -358,22 +365,36 @@ async def dry_run(payload: JobDryRun, user: CurrentUser, db: DB) -> JobDryRunOut
     except Exception as exc:  # noqa: BLE001 — 建客户端就失败（密钥解密等），原因照样回显
         out = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
-    note = None
-    if payload.model_source == ModelSource.personal.value and out.get("ok"):
-        note = await _bill_dry_run(db, user, payload, out.get("usage") or {})
+    note, billing_ok = None, None
+    if payload.model_source == ModelSource.personal.value:
+        # 重定向的模型名不给用户看：回显的请求体和响应里都换回用户选的名字
+        _mask_upstream(body, mc)
+        _mask_upstream(out.get("response"), mc)
+        if out.get("ok"):
+            note, billing_ok = await _bill_dry_run(db, user, payload, out.get("usage") or {})
 
     return JobDryRunOut(
-        custom_id=item.custom_id, item_index=payload.item_index, request_body=body, billing=note, **out,
+        custom_id=item.custom_id, item_index=payload.item_index, request_body=body,
+        billing=note, billing_ok=billing_ok, **out,
     )
 
 
-async def _bill_dry_run(db: DB, user: User, payload: JobDryRun, usage: dict) -> str | None:
-    """独立计费时，试跑那一条用的是平台的推理 Key，也要向用户扣费。"""
-    if not billing_mode(await read_runtime(db)):
-        return None
+def _mask_upstream(data: object, mc: ModelConfig) -> None:
+    if isinstance(data, dict) and mc.model_name != mc.display_name and data.get("model") == mc.model_name:
+        data["model"] = mc.display_name
+
+
+async def _bill_dry_run(db: DB, user: User, payload: JobDryRun, usage: dict) -> tuple[str | None, bool | None]:
+    """独立计费时，试跑那一条用的是平台的推理 Key，也要向用户扣费。
+
+    返回（说明，是否扣上）。扣费失败或计费接口不通时前端不提交任务 ——
+    整批跑起来同样会扣不上，不如现在就让用户处理。
+    """
+    if not billing_applies(payload.personal_model or "", await read_runtime(db)):
+        return None, None
     record = billing.record_for_try(user, payload.personal_model or "", usage)
     if record is None:
-        return "网关没有返回用量，本次试跑未计费"
+        return "网关没有返回用量，本次试跑未计费", None
     if payload.personal_token:
         record.key_encrypted = encrypt_secret(payload.personal_token)
     db.add(record)
@@ -381,10 +402,13 @@ async def _bill_dry_run(db: DB, user: User, payload: JobDryRun, usage: dict) -> 
 
     sent = await billing.send_record(record.id)
     if sent is None or sent.status == BillingStatus.pending:
-        return "计费接口暂时不可用，稍后会自动补扣"
+        return "试跑计费失败：计费接口暂时不可用，请稍后再试（这一条稍后会自动补扣）", False
     if sent.status == BillingStatus.failed:
-        return "试跑计费失败：" + billing.describe(sent.error_code, sent.error, sent.model_name)
-    return f"已按用量扣费（{sent.prompt_tokens} 输入 + {sent.completion_tokens} 输出 tokens）"
+        # 说明文案是按暂停中的任务写的（点「继续」）；这里还没有任务，改成重新提交
+        hint = billing.describe(sent.error_code, sent.error, sent.model_name)
+        hint = re.sub(r"(后)?点「继续」(即可补扣并接着跑)?", r"\1重新提交", hint)
+        return "试跑计费失败：" + hint, False
+    return f"已按用量扣费（{sent.prompt_tokens} 输入 + {sent.completion_tokens} 输出 tokens）", True
 
 
 async def _resolve_shared_model(payload: ModelSelection, user: User, db: DB) -> ModelConfig:
@@ -412,7 +436,10 @@ async def _resolve_personal_model(payload: ModelSelection, user: User, db: DB) -
     # 提交时再校验一次权限：token 可能已被网关回收，或模型权限被调整。
     # 早失败好过让任务排到队列里再整批报错。
     try:
-        allowed, _ = await list_user_models(runtime, token)
+        allowed, info = await list_user_models(runtime, token)
+        # 这次带了新 Key：「限制 API Key 添加」开着时先确认是 batch 分组
+        if billed and payload.personal_token and runtime.get("user_gateway_billing_require_batch_key"):
+            await billing.verify_batch_key(runtime, payload.personal_token, info)
     except GatewayError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.message) from exc
 
@@ -422,6 +449,10 @@ async def _resolve_personal_model(payload: ModelSelection, user: User, db: DB) -
             f"你的 Key 不能使用模型 {payload.personal_model}，请重新选择"
             if billed else f"你的 token 没有模型 {payload.personal_model} 的权限，请重新选择",
         )
+
+    # 分模型配置可以单独指定推理接口，选定模型后再确认它的推理接口配齐了
+    if billed and (problem := billing_config_error(runtime, payload.personal_model)):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, problem)
 
     if payload.personal_token and payload.remember_token:
         user.llm_token_encrypted = encrypt_secret(payload.personal_token)
@@ -967,7 +998,7 @@ async def change_model(job_id: str, payload: JobModelChange, user: CurrentUser, 
 
     # 换模型前把旧模型的用量结成一笔，计费起点挪到当前用量
     await billing.cut_before_change(
-        db, job, personal and billing_mode(await read_runtime(db)),
+        db, job, personal and billing_applies(payload.personal_model or "", await read_runtime(db)),
     )
     job.model_source = ModelSource.personal if personal else ModelSource.shared
     job.model_config_id = None if personal else mc.id

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter
@@ -46,7 +47,47 @@ async def get_runtime_settings(db: DB) -> SystemSettingsOut:
     out.user_gateway_billing_token_masked = mask_secret(
         decrypt_secret(runtime.get("user_gateway_billing_token_encrypted") or "")
     )
+    stored = runtime.get("user_gateway_reasoning_rules") or []
+    for rule, raw in zip(out.user_gateway_reasoning_rules, stored, strict=False):
+        rule.inference_api_key_masked = mask_secret(
+            decrypt_secret((raw or {}).get("inference_api_key_encrypted") or "")
+        )
     return out
+
+
+def _public_view(out: SystemSettingsOut) -> SystemSettingsOut:
+    """普通用户看到的设置：去掉推理/计费接口地址和重定向模型名，这些只有管理员需要知道。"""
+    out.user_gateway_inference_base_url = ""
+    out.user_gateway_billing_url = ""
+    out.user_gateway_inference_api_key_masked = None
+    out.user_gateway_billing_token_masked = None
+    out.smtp_password_masked = None
+    for rule in out.user_gateway_reasoning_rules:
+        rule.inference_base_url = ""
+        rule.upstream_model = ""
+        rule.inference_api_key_masked = None
+    return out
+
+
+def _merge_rule_secrets(new_rules: list[dict], old_rules: list[dict]) -> list[dict]:
+    """分模型配置里的 API Key 只写不读：按规则 id 找回已存的密文，传了新值才替换。"""
+    old_keys = {
+        str(r.get("id")): r.get("inference_api_key_encrypted") or ""
+        for r in old_rules if isinstance(r, dict) and r.get("id")
+    }
+    merged = []
+    for rule in new_rules:
+        rule = dict(rule)
+        rule["id"] = rule.get("id") or uuid.uuid4().hex
+        rule.pop("inference_api_key_masked", None)
+        raw = rule.pop("inference_api_key", None)
+        if raw is None:
+            rule["inference_api_key_encrypted"] = old_keys.get(rule["id"], "")
+        else:
+            raw = raw.strip()
+            rule["inference_api_key_encrypted"] = encrypt_secret(raw) if raw else ""
+        merged.append(rule)
+    return merged
 
 
 # 只写不读的密钥字段：请求里的明文字段 -> 库里的密文字段
@@ -58,9 +99,10 @@ _SECRET_FIELDS = {
 
 
 @router.get("/settings", response_model=SystemSettingsOut)
-async def read_settings(_: CurrentUser, db: DB) -> SystemSettingsOut:
-    """所有登录用户都能读（前端需要公告与上传限制）。"""
-    return await get_runtime_settings(db)
+async def read_settings(user: CurrentUser, db: DB) -> SystemSettingsOut:
+    """所有登录用户都能读（前端需要公告与上传限制）；接口地址等只给管理员看。"""
+    out = await get_runtime_settings(db)
+    return out if user.role == UserRole.admin else _public_view(out)
 
 
 def _usage(q: Quota) -> StorageUsage:
@@ -89,6 +131,16 @@ async def update_settings(payload: SystemSettingsUpdate, _: CurrentAdmin, db: DB
         if field in payload.model_fields_set:
             raw = (getattr(payload, field) or "").strip()
             changes[stored] = encrypt_secret(raw) if raw else ""
+
+    if "user_gateway_reasoning_rules" in changes:
+        # model_dump 的 exclude_none 会把「没传新 Key」的 None 丢掉，要用原始字段区分「不改」和「清除」
+        new_rules = [
+            {**r.model_dump(exclude={"inference_api_key", "inference_api_key_masked"}),
+             **({"inference_api_key": r.inference_api_key} if r.inference_api_key is not None else {})}
+            for r in payload.user_gateway_reasoning_rules or []
+        ]
+        old_rules = (await read_runtime(db)).get("user_gateway_reasoning_rules") or []
+        changes["user_gateway_reasoning_rules"] = _merge_rule_secrets(new_rules, old_rules)
 
     await write_runtime(db, changes)
     return await get_runtime_settings(db)

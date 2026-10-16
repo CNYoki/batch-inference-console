@@ -198,6 +198,9 @@ def build_request_body(
 
     body["model"] = mc.model_name
     body["stream"] = False
+    # 运行时附加、任何一方都不能覆盖的片段（个人网关透传用户 Key 时的 batch 标识）。
+    # 不是库里的列，只有现场拼的个人模型配置上才有
+    body.update(getattr(mc, "body_marker", None) or {})
     return body
 
 

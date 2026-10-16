@@ -57,6 +57,17 @@ DEFAULTS: dict = {
     "user_gateway_billing_token_encrypted": "",
     # 运行中的任务每隔多少秒把新增用量扣一次费；暂停、取消、完成时也会立即结算
     "user_gateway_billing_interval": 60,
+    # 推理 / 计费接口的 API Key 透传用户自己的 Key（接口本身认用户 Key 时用），此时不用填平台的 Key
+    "user_gateway_inference_key_passthrough": False,
+    "user_gateway_billing_key_passthrough": False,
+    # 推理接口透传用户 Key 时合进请求体的标识，让网关认出这是批量平台发来的请求、放行 batch Key
+    "user_gateway_passthrough_marker": {"batch": True},
+    # 仅单独配置的模型计费：只有命中打开了「模型独立计费」的分模型配置的模型才调计费接口，
+    # 其余模型照常走全局推理接口、不计费
+    "user_gateway_billing_only_matched": False,
+    # 限制 API Key 添加：用户新填的 Key 不是 batch 分组就直接拒绝。
+    # Key 用量查询返回了 group 就看 group，否则发一笔 0 元计费试探
+    "user_gateway_billing_require_batch_key": False,
     # ---- 单模型同时运行的任务数上限（所有 worker 合计）----
     # 按真实模型名匹配：公用模型取配置里的 model_name，个人网关模型取网关里的模型名。
     # [{"pattern": "qwen3.8-27b", "max_running_jobs": 4}]
