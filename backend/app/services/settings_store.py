@@ -68,6 +68,8 @@ DEFAULTS: dict = {
     # 限制 API Key 添加：用户新填的 Key 不是 batch 分组就直接拒绝。
     # Key 用量查询返回了 group 就看 group，否则发一笔 0 元计费试探
     "user_gateway_billing_require_batch_key": False,
+    # 0 元计费试探用的模型名（填网关里真实存在的模型）；留空用 batch-key-check
+    "user_gateway_key_check_model": "",
     # ---- 单模型同时运行的任务数上限（所有 worker 合计）----
     # 按真实模型名匹配：公用模型取配置里的 model_name，个人网关模型取网关里的模型名。
     # [{"pattern": "qwen3.8-27b", "max_running_jobs": 4}]
