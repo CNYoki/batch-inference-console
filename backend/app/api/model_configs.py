@@ -22,7 +22,15 @@ from ..schemas import (
     PersonalTokenIn,
     ProbeResult,
 )
-from ..services.gateway import GatewayError, KeyInfo, billing_mode, list_user_models, resolve_reasoning
+from ..services import billing
+from ..services.gateway import (
+    GatewayError,
+    KeyInfo,
+    billing_applies,
+    billing_mode,
+    list_user_models,
+    resolve_reasoning,
+)
 from ..services.inference import InferenceClient, InferenceError
 from ..services.settings_store import read_runtime
 
@@ -40,6 +48,11 @@ def _personal_reasoning(models: list[str], runtime: dict) -> dict[str, PersonalR
             default_effort=cfg["default_effort"],
         )
     return out
+
+
+def _personal_billing(models: list[str], runtime: dict) -> dict[str, bool]:
+    """哪些个人模型会走计费接口（独立计费时按分模型配置判断）。"""
+    return {name: billing_applies(name, runtime) for name in models}
 
 
 def _key_out(info: KeyInfo | None) -> PersonalKeyInfo | None:
@@ -102,6 +115,7 @@ async def list_model_options(user: CurrentUser, db: DB) -> ModelOptionsOut:
         out.personal_error = exc.message
     else:
         out.personal_key = _key_out(info)
+        out.personal_billing = _personal_billing(out.personal, runtime)
         out.personal_reasoning = _personal_reasoning(out.personal, runtime)
     return out
 
@@ -115,6 +129,9 @@ async def list_personal_models(payload: PersonalTokenIn, user: CurrentUser, db: 
 
     try:
         models, info = await list_user_models(runtime, payload.token)
+        # 「限制 API Key 添加」：新填的 Key 必须是 batch 分组，校验不过不保存
+        if billing_mode(runtime) and runtime.get("user_gateway_billing_require_batch_key"):
+            await billing.verify_batch_key(runtime, payload.token, info)
     except GatewayError as exc:
         # token 错、网关挂了都属于用户可自行修正的问题，用 400 而不是 502
         raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.message) from exc
@@ -128,6 +145,7 @@ async def list_personal_models(payload: PersonalTokenIn, user: CurrentUser, db: 
 
     return PersonalModelsOut(
         models=models, saved=saved, reasoning=_personal_reasoning(models, runtime), key=_key_out(info),
+        billing=_personal_billing(models, runtime),
     )
 
 

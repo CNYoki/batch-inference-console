@@ -15,7 +15,7 @@ from ..db import session_scope
 from ..models import Job, JobError, JobStatus, ModelConfig, ModelSource, User
 from ..services import billing
 from ..services import results as results_svc
-from ..services.gateway import billing_config_error, billing_mode, build_personal_config
+from ..services.gateway import billing_applies, billing_config_error, billing_mode, build_personal_config
 from ..services.inference import InferenceClient, InferenceError, build_request_body
 from ..services.jsonl import JsonlError, iter_items
 from ..services.notifications import notify_job
@@ -419,7 +419,8 @@ class JobRunner:
                 if billing_mode(runtime):
                     if problem := billing_config_error(runtime, job.personal_model_name):
                         return job, None, problem
-                    self._billing = True
+                    # 「仅单独配置的模型计费」打开时，没命中的模型照常推理、不调计费接口
+                    self._billing = billing_applies(job.personal_model_name, runtime)
                     self._billing_interval = billing.interval_of(runtime)
                 return job, build_personal_config(job.personal_model_name, token, runtime), None
 

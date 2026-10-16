@@ -6,10 +6,11 @@ from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, select
 
 from ..core.deps import DB, CurrentAdmin
+from ..core.security import decrypt_secret
 from ..models import AuditLog, BillingRecord, BillingStatus, Job, User
 from ..schemas import BillingRecordListOut, BillingRecordOut, GatewayTestResult
 from ..services import billing
-from ..services.gateway import GatewayError, billing_endpoint, fetch_models, inference_endpoint
+from ..services.gateway import GatewayError, billing_auth, billing_endpoint, fetch_models, inference_endpoint
 from ..services.settings_store import read_runtime
 
 router = APIRouter(prefix="/admin/billing", tags=["billing"])
@@ -89,17 +90,21 @@ async def retry_record(record_id: int, admin: CurrentAdmin, db: DB) -> BillingRe
 
 
 @router.post("/test", response_model=GatewayTestResult)
-async def test_gateway(_: CurrentAdmin, db: DB) -> GatewayTestResult:
+async def test_gateway(admin: CurrentAdmin, db: DB) -> GatewayTestResult:
     """用已保存的配置测试推理接口和计费接口。
 
     计费接口发一个空请求体：令牌有效时网关回 400 invalid_request（参数缺失），
     不会真的扣费；令牌无效或权限不够时回 401/403。
     """
     runtime = await read_runtime(db)
+    # 透传用户 Key 时拿管理员自己保存的 Key 来测
+    own_key = decrypt_secret(admin.llm_token_encrypted) or ""
 
-    base, key = inference_endpoint({**runtime, "user_gateway_billing_enabled": True}, "")
+    base, key = inference_endpoint({**runtime, "user_gateway_billing_enabled": True}, own_key)
     if not base:
         inference_ok, inference_detail = False, "未填写推理接口地址"
+    elif not key and runtime.get("user_gateway_inference_key_passthrough"):
+        inference_ok, inference_detail = False, "推理接口设为透传用户 Key，请先在「新建任务」页保存你自己的 Key 再测试"
     else:
         try:
             models = await fetch_models(base, key, platform=True)
@@ -109,9 +114,15 @@ async def test_gateway(_: CurrentAdmin, db: DB) -> GatewayTestResult:
             preview = "、".join(models[:5]) + ("……" if len(models) > 5 else "")
             inference_ok, inference_detail = True, f"连接正常，共 {len(models)} 个模型：{preview}"
 
-    url, token = billing_endpoint(runtime)
-    if not url or not token:
-        billing_ok, billing_detail = False, "未填写计费接口地址或访问令牌"
+    url, _ = billing_endpoint(runtime)
+    token = billing_auth(runtime, own_key)
+    if not url:
+        billing_ok, billing_detail = False, "未填写计费接口地址"
+    elif not token:
+        billing_ok, billing_detail = False, (
+            "计费接口设为透传用户 Key，请先在「新建任务」页保存你自己的 Key 再测试"
+            if runtime.get("user_gateway_billing_key_passthrough") else "未填写计费接口访问令牌"
+        )
     else:
         async with httpx.AsyncClient(timeout=billing.BILLING_TIMEOUT) as client:
             outcome = await billing.post_billing(client, url, token, {})

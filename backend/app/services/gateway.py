@@ -112,18 +112,37 @@ def billing_mode(runtime: dict) -> bool:
     return bool(runtime.get("user_gateway_billing_enabled"))
 
 
+# 透传用户 Key 时的占位：配置检查不需要真的 Key，只要知道「这里会有 Key」
+_USER_KEY_PLACEHOLDER = "<user-key>"
+
+
 def inference_endpoint(runtime: dict, user_token: str) -> tuple[str, str]:
-    """执行推理用的地址和 Key：独立计费时是平台的推理接口，否则是网关 + 用户 token。"""
+    """执行推理用的地址和 Key：独立计费时是平台的推理接口，否则是网关 + 用户 token。
+
+    推理接口的 Key 可以设成透传用户 Key —— 推理接口本身就认用户的 Key 时用。
+    """
     if billing_mode(runtime):
-        key = decrypt_secret(runtime.get("user_gateway_inference_api_key_encrypted") or "") or ""
+        if runtime.get("user_gateway_inference_key_passthrough"):
+            key = user_token
+        else:
+            key = decrypt_secret(runtime.get("user_gateway_inference_api_key_encrypted") or "") or ""
         return (runtime.get("user_gateway_inference_base_url") or "").rstrip("/"), key
     return (runtime.get("user_gateway_base_url") or DEFAULTS["user_gateway_base_url"]).rstrip("/"), user_token
 
 
 def billing_endpoint(runtime: dict) -> tuple[str, str]:
-    """计费接口地址和管理员访问令牌（nap_...）。没配齐时返回空串。"""
+    """计费接口地址和管理员访问令牌（nap_...）。没配齐、或设成透传用户 Key 时令牌为空串。"""
+    if runtime.get("user_gateway_billing_key_passthrough"):
+        return (runtime.get("user_gateway_billing_url") or "").strip(), ""
     token = decrypt_secret(runtime.get("user_gateway_billing_token_encrypted") or "") or ""
     return (runtime.get("user_gateway_billing_url") or "").strip(), token
+
+
+def billing_auth(runtime: dict, user_key: str) -> str:
+    """调计费接口时 Authorization 用的 Key：平台访问令牌，或透传用户 Key。"""
+    if runtime.get("user_gateway_billing_key_passthrough"):
+        return user_key
+    return billing_endpoint(runtime)[1]
 
 
 def billing_endpoint_error(runtime: dict) -> str | None:
@@ -131,30 +150,47 @@ def billing_endpoint_error(runtime: dict) -> str | None:
     url, token = billing_endpoint(runtime)
     if not url:
         return "管理员尚未配置个人网关的计费接口地址"
-    if not token:
+    if not token and not runtime.get("user_gateway_billing_key_passthrough"):
         return "管理员尚未配置计费接口的访问令牌，或令牌无法解密"
     return None
+
+
+def billing_applies(model_name: str, runtime: dict) -> bool:
+    """这个模型要不要走计费接口。
+
+    独立计费开着时默认所有模型都计费；打开「仅单独配置的模型计费」后，
+    只有命中了打开「模型独立计费」的分模型配置的模型才计费，其余模型照常推理、不调计费接口。
+    """
+    if not billing_mode(runtime):
+        return False
+    if not runtime.get("user_gateway_billing_only_matched"):
+        return True
+    rule = match_rule(model_name, runtime)
+    return bool(rule and rule.get("billing_override"))
 
 
 def billing_config_error(runtime: dict, model_name: str | None = None) -> str | None:
     """独立计费模式下配置缺了哪样。返回 None 表示齐了。
 
-    给了模型名时按该模型实际走的推理接口检查（分模型配置可以单独指定推理接口）。
+    给了模型名时按该模型实际走的推理接口检查（分模型配置可以单独指定推理接口），
+    这个模型不计费时也就不要求计费接口。
     """
+    rule = match_rule(model_name, runtime) if model_name is not None else None
     if model_name is None:
-        base, key = inference_endpoint(runtime, "")
-        key_stored = bool(runtime.get("user_gateway_inference_api_key_encrypted"))
+        base, key = inference_endpoint(runtime, _USER_KEY_PLACEHOLDER)
     else:
-        base, key, _ = resolve_route(model_name, runtime, "")
-        rule = match_rule(model_name, runtime)
-        key_stored = bool(
-            (rule and rule.get("billing_override") and rule.get("inference_api_key_encrypted"))
-            or runtime.get("user_gateway_inference_api_key_encrypted")
-        )
+        base, key, _ = resolve_route(model_name, runtime, _USER_KEY_PLACEHOLDER)
     if not base:
         return "管理员尚未配置个人网关的推理接口地址"
+    # 推理接口可以不要 Key（内网自建）；只有填了却解不开时才报错
+    key_stored = bool(
+        (rule and rule.get("billing_override") and rule.get("inference_api_key_encrypted"))
+        or runtime.get("user_gateway_inference_api_key_encrypted")
+    )
     if key_stored and not key:
         return "推理接口 API Key 无法解密（SECRET_KEY 可能已变更），请管理员重新填写"
+    if model_name is not None and not billing_applies(model_name, runtime):
+        return None
     return billing_endpoint_error(runtime)
 
 
@@ -181,7 +217,10 @@ def resolve_route(model_name: str, runtime: dict, user_token: str) -> tuple[str,
     rule = match_rule(model_name, runtime)
     if rule and rule.get("billing_override"):
         base = (rule.get("inference_base_url") or "").rstrip("/") or base
-        key = decrypt_secret(rule.get("inference_api_key_encrypted") or "") or key
+        if rule.get("inference_key_passthrough"):
+            key = user_token
+        else:
+            key = decrypt_secret(rule.get("inference_api_key_encrypted") or "") or key
         upstream = (rule.get("upstream_model") or "").strip() or upstream
     return base, key, upstream
 
@@ -288,26 +327,10 @@ async def list_user_models(runtime: dict, token: str) -> tuple[list[str], KeyInf
     if billing_mode(runtime) and (problem := billing_endpoint_error(runtime)):
         raise GatewayError(problem)
     info = await check_billing_key(runtime, token) if billing_mode(runtime) else None
-    if billing_mode(runtime) and runtime.get("user_gateway_billing_require_batch_key"):
-        require_batch_key(info)
     return await fetch_models(runtime["user_gateway_base_url"], token), info
 
 
-def require_batch_key(info: KeyInfo | None) -> None:
-    """「限制 API Key 添加」开着时，确认 Key 属于 batch 分组。
-
-    查不到分组（查询接口不通、网关没返回 group）一律按不通过处理 —— 宁可让用户稍后重试，
-    也不能把非 batch 的 Key 放进来。
-    """
-    if info is None:
-        raise GatewayError("暂时无法确认你的 Key 所属分组，请稍后重试；仍不行请联系管理员")
-    if info.group is None:
-        raise GatewayError("个人网关没有返回 Key 的分组信息，无法确认是否为 batch 分组，请联系管理员")
-    if info.group.strip().lower() != BATCH_GROUP:
-        raise GatewayError(
-            f"只能添加 batch 分组的 Key（当前 Key 属于「{info.group}」分组），"
-            "请在个人网关的 API 令牌里新建一个分组为 batch 的 Key"
-        )
+NOT_BATCH_MESSAGE = "只能添加 batch 分组的 Key，请在个人网关的 API 令牌里新建一个分组为 batch 的 Key"
 
 
 def _parse_models(payload: Any) -> list[str]:

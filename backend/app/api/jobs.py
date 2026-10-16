@@ -60,6 +60,7 @@ from ..services import jsonl as jsonl_svc
 from ..services import results as results_svc
 from ..services.gateway import (
     GatewayError,
+    billing_applies,
     billing_config_error,
     billing_mode,
     build_personal_config,
@@ -306,7 +307,7 @@ async def create_job(payload: JobCreate, user: CurrentUser, db: DB) -> JobOut:
         total_items=validation.total,
         queued_at=datetime.now(UTC),
         # 只是先标上给前端看；worker 每次开跑时会按当时的设置再定一次
-        billing_enabled=personal and runtime.user_gateway_billing_enabled,
+        billing_enabled=personal and billing_applies(payload.personal_model or "", await read_runtime(db)),
     )
     db.add(job)
     await db.commit()
@@ -389,7 +390,7 @@ async def _bill_dry_run(db: DB, user: User, payload: JobDryRun, usage: dict) -> 
     返回（说明，是否扣上）。扣费失败或计费接口不通时前端不提交任务 ——
     整批跑起来同样会扣不上，不如现在就让用户处理。
     """
-    if not billing_mode(await read_runtime(db)):
+    if not billing_applies(payload.personal_model or "", await read_runtime(db)):
         return None, None
     record = billing.record_for_try(user, payload.personal_model or "", usage)
     if record is None:
@@ -435,7 +436,10 @@ async def _resolve_personal_model(payload: ModelSelection, user: User, db: DB) -
     # 提交时再校验一次权限：token 可能已被网关回收，或模型权限被调整。
     # 早失败好过让任务排到队列里再整批报错。
     try:
-        allowed, _ = await list_user_models(runtime, token)
+        allowed, info = await list_user_models(runtime, token)
+        # 这次带了新 Key：「限制 API Key 添加」开着时先确认是 batch 分组
+        if billed and payload.personal_token and runtime.get("user_gateway_billing_require_batch_key"):
+            await billing.verify_batch_key(runtime, payload.personal_token, info)
     except GatewayError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.message) from exc
 
@@ -994,7 +998,7 @@ async def change_model(job_id: str, payload: JobModelChange, user: CurrentUser, 
 
     # 换模型前把旧模型的用量结成一笔，计费起点挪到当前用量
     await billing.cut_before_change(
-        db, job, personal and billing_mode(await read_runtime(db)),
+        db, job, personal and billing_applies(payload.personal_model or "", await read_runtime(db)),
     )
     job.model_source = ModelSource.personal if personal else ModelSource.shared
     job.model_config_id = None if personal else mc.id

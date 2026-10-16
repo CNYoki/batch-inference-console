@@ -25,7 +25,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.security import decrypt_secret
 from ..db import session_scope
 from ..models import BillingRecord, BillingStatus, Job, JobStatus, ModelSource, User
-from .gateway import billing_endpoint
+from .gateway import (
+    BATCH_GROUP,
+    NOT_BATCH_MESSAGE,
+    GatewayError,
+    KeyInfo,
+    billing_auth,
+    billing_endpoint,
+)
 from .settings_store import read_runtime
 
 log = logging.getLogger(__name__)
@@ -274,13 +281,14 @@ async def send(
     if not await _claim(record_id, statuses):
         return None
 
-    url, token = billing_endpoint(runtime)
+    url, _ = billing_endpoint(runtime)
     async with session_scope() as db:
         record = await db.get(BillingRecord, record_id)
         if record is None:
             return None
         key = decrypt_secret(record.key_encrypted)
-        if not url or not token:
+        token = billing_auth(runtime, key or "")
+        if not url or (not token and key):
             outcome = Outcome(False, retriable=True, code="not_configured", message="计费接口未配置")
         elif not key:
             outcome = Outcome(
@@ -336,6 +344,56 @@ async def send_record(record_id: int, *, include_failed: bool = False) -> Billin
         runtime = await read_runtime(db)
     async with _client() as client:
         return await send(client, record_id, runtime, include_failed=include_failed)
+
+
+# --------------------------------------------------------------------------- #
+# 限制 API Key 添加
+# --------------------------------------------------------------------------- #
+# 这些错误说明 Key 本身不能用于批量计费
+_KEY_REJECT_CODES = {"invalid_key", "key_unavailable", "key_not_batch", "user_disabled", "batch_group_unavailable"}
+KEY_CHECK_MODEL = "batch-key-check"
+
+
+async def verify_batch_key(runtime: dict, key: str, info: KeyInfo | None) -> None:
+    """确认用户新填的 Key 属于 batch 分组，不是就抛 GatewayError。
+
+    Key 用量查询返回了 group 就直接看 group；没返回就向计费接口发一笔 0 元计费试探：
+    非 batch 的 Key 会被拒（key_not_batch 等），batch Key 扣 0 元、不影响余额。
+    结果说不清的一律不放行 —— 宁可让用户找管理员，也不能把非 batch 的 Key 放进来。
+    """
+    if info is not None and info.group:
+        if info.group.strip().lower() != BATCH_GROUP:
+            raise GatewayError(f"{NOT_BATCH_MESSAGE}（当前 Key 属于「{info.group}」分组）")
+        return
+
+    url, _ = billing_endpoint(runtime)
+    token = billing_auth(runtime, key)
+    if not url or not token:
+        raise GatewayError("计费接口未配置，无法校验 Key 分组，请联系管理员")
+    payload = {
+        "key": key,
+        "request_id": f"{REQUEST_PREFIX}-keycheck-{uuid.uuid4().hex}",
+        "model_name": KEY_CHECK_MODEL,
+        "amount": "0",
+        "note": "批量推理平台校验 Key 分组（0 元，不扣费）",
+    }
+    async with _client() as client:
+        outcome = await post_billing(client, url, token, payload)
+    if outcome.ok:
+        return
+    if outcome.code == "key_not_batch":
+        raise GatewayError(NOT_BATCH_MESSAGE)
+    if outcome.code in _KEY_REJECT_CODES:
+        raise GatewayError(describe(outcome.code, outcome.message))
+    if outcome.code == "model_not_allowed":
+        # 过了分组检查，只是这个 Key 限定了模型、不含校验用的模型名 —— Key 本身没问题
+        return
+    if outcome.retriable:
+        raise GatewayError(f"暂时无法校验 Key 分组（{outcome.message or outcome.code}），请稍后重试")
+    raise GatewayError(
+        f"无法确认 Key 是否属于 batch 分组：计费接口返回 {outcome.code}"
+        f"{'：' + outcome.message if outcome.message else ''}，请联系管理员"
+    )
 
 
 # --------------------------------------------------------------------------- #

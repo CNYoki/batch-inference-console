@@ -80,6 +80,8 @@ export interface ModelOptions {
   has_saved_token: boolean
   personal_error?: string | null
   personal_key?: PersonalKeyInfo | null
+  /** 模型名 -> 是否走计费接口 */
+  personal_billing?: Record<string, boolean>
   /** 模型名 -> 推理能力 */
   personal_reasoning: Record<string, PersonalReasoningCap>
 }
@@ -89,6 +91,7 @@ export interface PersonalModels {
   saved: boolean
   reasoning: Record<string, PersonalReasoningCap>
   key?: PersonalKeyInfo | null
+  billing?: Record<string, boolean>
 }
 
 /** 独立计费时用户 batch Key 的额度（网关内部单位，默认 500000 = $1） */
@@ -124,6 +127,8 @@ export interface GatewayReasoningRule {
   /** 只写：传新值才覆盖，空串清除 */
   inference_api_key?: string | null
   inference_api_key_masked?: string | null
+  /** 推理接口透传用户自己的 Key */
+  inference_key_passthrough?: boolean
   /** 实际请求推理接口时用的模型名，不展示给用户 */
   upstream_model?: string
 }
@@ -266,6 +271,11 @@ export interface SystemSettings {
   user_gateway_billing_interval: number
   /** 限制 API Key 添加：只接受 batch 分组的 Key */
   user_gateway_billing_require_batch_key: boolean
+  /** 推理 / 计费接口的 API Key 透传用户自己的 Key */
+  user_gateway_inference_key_passthrough: boolean
+  user_gateway_billing_key_passthrough: boolean
+  /** 只有命中「模型独立计费」的模型才调计费接口 */
+  user_gateway_billing_only_matched: boolean
 
   model_job_limits: ModelJobLimit[]
 

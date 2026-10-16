@@ -35,6 +35,7 @@ type RuleForm = {
   /** 只写：留空表示不修改 */
   inference_api_key?: string
   inference_api_key_masked?: string | null
+  inference_key_passthrough?: boolean
   upstream_model?: string
 }
 
@@ -61,6 +62,8 @@ export default function AdminSystemPage() {
   const [gatewayTesting, setGatewayTesting] = useState(false)
   const [gatewayTest, setGatewayTest] = useState<GatewayTestResult | null>(null)
   const billingOn = Form.useWatch('user_gateway_billing_enabled', form) as boolean | undefined
+  const inferencePassthrough = Form.useWatch('user_gateway_inference_key_passthrough', form) as boolean | undefined
+  const billingPassthrough = Form.useWatch('user_gateway_billing_key_passthrough', form) as boolean | undefined
 
   const load = useCallback(async () => {
     const [d, u] = await Promise.all([
@@ -156,8 +159,10 @@ export default function AdminSystemPage() {
           ? { user_gateway_billing_url: values.user_gateway_billing_url } : {}),
         ...(values.user_gateway_billing_interval !== undefined
           ? { user_gateway_billing_interval: values.user_gateway_billing_interval } : {}),
-        ...(values.user_gateway_billing_require_batch_key !== undefined
-          ? { user_gateway_billing_require_batch_key: values.user_gateway_billing_require_batch_key } : {}),
+        ...Object.fromEntries([
+          'user_gateway_billing_require_batch_key', 'user_gateway_billing_only_matched',
+          'user_gateway_inference_key_passthrough', 'user_gateway_billing_key_passthrough',
+        ].filter((k) => values[k] !== undefined).map((k) => [k, values[k]])),
         // 密钥只在真的输入了新值时才提交，留空 = 保持原值
         ...(values.user_gateway_inference_api_key
           ? { user_gateway_inference_api_key: values.user_gateway_inference_api_key } : {}),
@@ -185,6 +190,7 @@ export default function AdminSystemPage() {
             // 规则 id 用来在后端找回已存的 API Key；Key 只在填了新值时提交
             id: r.id ?? null,
             billing_override: !!r.billing_override,
+            inference_key_passthrough: !!r.inference_key_passthrough,
             inference_base_url: (r.inference_base_url ?? '').trim(),
             upstream_model: (r.upstream_model ?? '').trim(),
             ...(r.inference_api_key ? { inference_api_key: r.inference_api_key } : {}),
@@ -462,13 +468,23 @@ export default function AdminSystemPage() {
                   </Form.Item>
                 </Col>
                 <Col xs={24} md={12}>
-                  <Form.Item name="user_gateway_inference_api_key" label="推理接口 API Key"
-                    extra={settings?.user_gateway_inference_api_key_masked
-                      ? `当前：${settings.user_gateway_inference_api_key_masked}，留空表示不修改`
-                      : '平台自己的 Key，加密存储，不会回显'}>
-                    <Input.Password className="mono" autoComplete="new-password"
-                      placeholder={settings?.user_gateway_inference_api_key_masked ? '不修改请留空' : 'sk-...'} />
+                  <Form.Item name="user_gateway_inference_key_passthrough" label="推理接口 API Key"
+                    valuePropName="checked" style={{ marginBottom: 8 }}>
+                    <Switch checkedChildren="透传用户 Key" unCheckedChildren="平台 Key" />
                   </Form.Item>
+                  {inferencePassthrough ? (
+                    <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+                      推理时直接用用户自己填的 Key 调推理接口
+                    </Typography.Paragraph>
+                  ) : (
+                    <Form.Item name="user_gateway_inference_api_key"
+                      extra={settings?.user_gateway_inference_api_key_masked
+                        ? `当前：${settings.user_gateway_inference_api_key_masked}，留空表示不修改`
+                        : '平台自己的 Key，加密存储，不会回显'}>
+                      <Input.Password className="mono" autoComplete="new-password"
+                        placeholder={settings?.user_gateway_inference_api_key_masked ? '不修改请留空' : 'sk-...'} />
+                    </Form.Item>
+                  )}
                 </Col>
               </Row>
               <Row gutter={16}>
@@ -483,19 +499,34 @@ export default function AdminSystemPage() {
                   </Form.Item>
                 </Col>
                 <Col xs={24} md={12}>
-                  <Form.Item name="user_gateway_billing_token" label="计费接口 API Key"
-                    extra={settings?.user_gateway_billing_token_masked
-                      ? `当前：${settings.user_gateway_billing_token_masked}，留空表示不修改`
-                      : '个人网关管理员创建的访问令牌，只需勾选「批量计费 → 编辑」权限'}>
-                    <Input.Password className="mono" autoComplete="new-password"
-                      placeholder={settings?.user_gateway_billing_token_masked ? '不修改请留空' : 'nap_...'} />
+                  <Form.Item name="user_gateway_billing_key_passthrough" label="计费接口 API Key"
+                    valuePropName="checked" style={{ marginBottom: 8 }}>
+                    <Switch checkedChildren="透传用户 Key" unCheckedChildren="平台令牌" />
                   </Form.Item>
+                  {billingPassthrough ? (
+                    <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+                      调计费接口时请求头带用户自己的 Key（请求体里照常带 key）
+                    </Typography.Paragraph>
+                  ) : (
+                    <Form.Item name="user_gateway_billing_token"
+                      extra={settings?.user_gateway_billing_token_masked
+                        ? `当前：${settings.user_gateway_billing_token_masked}，留空表示不修改`
+                        : '个人网关管理员创建的访问令牌，只需勾选「批量计费 → 编辑」权限'}>
+                      <Input.Password className="mono" autoComplete="new-password"
+                        placeholder={settings?.user_gateway_billing_token_masked ? '不修改请留空' : 'nap_...'} />
+                    </Form.Item>
+                  )}
                 </Col>
               </Row>
               <Space size={24} align="start" wrap>
                 <Form.Item name="user_gateway_billing_require_batch_key" label="限制API key添加"
                   valuePropName="checked"
-                  extra="打开后用户添加的 Key 必须属于 batch 分组，否则直接拒绝">
+                  extra="打开后用户新添加的 Key 必须属于 batch 分组，否则直接拒绝（网关不返回分组时发一笔 0 元计费来判断）">
+                  <Switch />
+                </Form.Item>
+                <Form.Item name="user_gateway_billing_only_matched" label="仅单独配置的模型计费"
+                  valuePropName="checked"
+                  extra="打开后只有命中「分模型配置」里打开了「模型独立计费」的模型才调计费接口，其余模型照常推理、不计费">
                   <Switch />
                 </Form.Item>
                 <Form.Item name="user_gateway_billing_interval" label="计费间隔(秒)"
@@ -631,13 +662,19 @@ export default function AdminSystemPage() {
                           rules={[{ pattern: /^https?:\/\//, message: '必须以 http:// 或 https:// 开头' }]}>
                           <Input className="mono" placeholder="https://inference.example.com/v1" style={{ width: 320 }} />
                         </Form.Item>
-                        <Form.Item {...rest} name={[name, 'inference_api_key']} label="推理接口 API Key"
-                          extra={rules?.[name]?.inference_api_key_masked
-                            ? `当前：${rules[name].inference_api_key_masked}，留空表示不修改`
-                            : '留空用全局推理接口的 Key'}>
-                          <Input.Password className="mono" autoComplete="new-password" style={{ width: 260 }}
-                            placeholder={rules?.[name]?.inference_api_key_masked ? '不修改请留空' : 'sk-...'} />
+                        <Form.Item {...rest} name={[name, 'inference_key_passthrough']} label="推理接口 API Key"
+                          valuePropName="checked">
+                          <Switch checkedChildren="透传用户 Key" unCheckedChildren="单独配置" />
                         </Form.Item>
+                        {!rules?.[name]?.inference_key_passthrough && (
+                          <Form.Item {...rest} name={[name, 'inference_api_key']} label=" " colon={false}
+                            extra={rules?.[name]?.inference_api_key_masked
+                              ? `当前：${rules[name].inference_api_key_masked}，留空表示不修改`
+                              : '留空用全局推理接口的 Key'}>
+                            <Input.Password className="mono" autoComplete="new-password" style={{ width: 260 }}
+                              placeholder={rules?.[name]?.inference_api_key_masked ? '不修改请留空' : 'sk-...'} />
+                          </Form.Item>
+                        )}
                         <Form.Item {...rest} name={[name, 'upstream_model']} label="重定向模型名"
                           extra="实际请求推理接口时用的模型名，不会展示给用户；留空用原模型名">
                           <Input className="mono" placeholder="例：Qwen/Qwen3-32B" style={{ width: 240 }} />

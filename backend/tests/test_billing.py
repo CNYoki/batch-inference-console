@@ -49,6 +49,7 @@ class FakeGateway:
         self.calls: list[dict] = []
         self.billing_error: tuple[int, str] | None = None
         self.infer_delay = 0.0
+        self.billing_passthrough = False
         # (哪个推理接口, Authorization, 请求里的 model)
         self.inferred: list[tuple[str, str, str]] = []
         self.usage = {"prompt_tokens": 10, "completion_tokens": 5,
@@ -81,7 +82,9 @@ class FakeGateway:
             assert request.headers["authorization"].startswith("Bearer sk-")
             return httpx.Response(200, json={"data": [{"id": "gw-m"}, {"id": "gw-other"}]})
         if url.startswith("http://gw.test/api/usage/token"):
-            group = {"Bearer sk-batch": "batch", "Bearer sk-normal": "default", "Bearer sk-nogroup": None}
+            # sk-nogroup* 模拟老网关：用量查询不返回 group，只能靠 0 元计费试探
+            group = {"Bearer sk-batch": "batch", "Bearer sk-normal": "default",
+                     "Bearer sk-nogroup": None, "Bearer sk-nogroup-plain": None}
             auth = request.headers["authorization"]
             if auth not in group:
                 return httpx.Response(401, json={"success": False, "message": "无效的令牌"})
@@ -93,11 +96,19 @@ class FakeGateway:
                 data["group"] = group[auth]
             return httpx.Response(200, json={"code": True, "data": data})
         if url == BILL:
-            assert request.headers["authorization"] == "Bearer nap-token"
             body = json.loads(request.content or b"{}")
+            # 透传模式下请求头里是用户自己的 Key
+            expected = f"Bearer {body.get('key')}" if self.billing_passthrough else "Bearer nap-token"
+            assert request.headers["authorization"] == expected
             self.calls.append(body)
             if not body:
                 return httpx.Response(400, json={"success": False, "code": "invalid_request", "message": "缺参数"})
+            if "amount" in body:
+                # 0 元计费：非 batch 的 Key 被拒，batch Key 扣 0 元
+                if body["key"] in ("sk-normal", "sk-nogroup-plain"):
+                    return httpx.Response(403, json={"success": False, "code": "key_not_batch", "message": "非 batch"})
+                return httpx.Response(200, json={"success": True, "data": {
+                    "request_id": body["request_id"], "quota": 0, "billing_source": "wallet", "duplicate": False}})
             if self.billing_error:
                 status_code, code = self.billing_error
                 return httpx.Response(status_code, json={"success": False, "code": code, "message": code})
@@ -750,8 +761,14 @@ async def test_require_batch_key_rejects_other_groups(admin_client: AsyncClient,
 
     resp = await admin_client.post("/api/models/personal", json={"token": "sk-normal", "remember": True})
     assert resp.status_code == 400 and "batch 分组" in resp.json()["detail"]
-    resp = await admin_client.post("/api/models/personal", json={"token": "sk-nogroup", "remember": True})
-    assert resp.status_code == 400 and "分组" in resp.json()["detail"]
+    # 网关没返回分组时发 0 元计费试探：batch Key 放行，其余拒绝
+    calls_before = len(gw.calls)
+    resp = await admin_client.post("/api/models/personal", json={"token": "sk-nogroup", "remember": False})
+    assert resp.status_code == 200, resp.text
+    probe = gw.calls[calls_before]
+    assert probe["amount"] == "0" and probe["request_id"].startswith("bic-keycheck-")
+    resp = await admin_client.post("/api/models/personal", json={"token": "sk-nogroup-plain", "remember": True})
+    assert resp.status_code == 400 and "batch 分组" in resp.json()["detail"]
     # 被拒的 Key 不会保存下来
     me = (await admin_client.get("/api/auth/me")).json()
     async with session_scope() as db:
@@ -762,3 +779,75 @@ async def test_require_batch_key_rejects_other_groups(admin_client: AsyncClient,
         await write_runtime(db, {"user_gateway_billing_require_batch_key": False})
     resp = await admin_client.post("/api/models/personal", json={"token": "sk-normal", "remember": False})
     assert resp.status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# 透传用户 Key、仅单独配置的模型计费
+# --------------------------------------------------------------------------- #
+def test_passthrough_uses_user_key():
+    from app.services.gateway import billing_auth, billing_endpoint_error, resolve_route
+
+    runtime = {**DEFAULTS, **BILLING_RUNTIME,
+               "user_gateway_inference_key_passthrough": True, "user_gateway_billing_key_passthrough": True}
+    assert resolve_route("gw-m", runtime, "sk-user")[1] == "sk-user"
+    assert billing_auth(runtime, "sk-user") == "sk-user"
+    # 透传时不要求平台的访问令牌
+    assert billing_endpoint_error(runtime) is None
+    assert billing_config_error_for(runtime, "gw-m") is None
+
+    # 分模型配置也能单独透传
+    rule_runtime = _route_runtime(billing_override=True, inference_base_url="http://infer2.test/v1",
+                                  inference_key_passthrough=True)
+    assert resolve_route("gw-m", rule_runtime, "sk-user") == ("http://infer2.test/v1", "sk-user", "gw-m")
+
+
+def billing_config_error_for(runtime: dict, model: str):
+    from app.services.gateway import billing_config_error
+
+    return billing_config_error(runtime, model)
+
+
+def test_only_matched_models_are_billed():
+    from app.services.gateway import billing_applies
+
+    runtime = _route_runtime(billing_override=True)
+    assert billing_applies("gw-m", runtime) and billing_applies("other", runtime)
+    only = {**runtime, "user_gateway_billing_only_matched": True}
+    assert billing_applies("gw-m", only)
+    # 没命中、或命中了但没打开「模型独立计费」的都不计费
+    assert not billing_applies("other", only)
+    assert not billing_applies("gw-m", {**only, "user_gateway_reasoning_rules": [
+        {"pattern": "gw-*", "billing_override": False}]})
+    # 不计费的模型不要求计费接口配齐
+    assert billing_config_error_for({**only, "user_gateway_billing_url": ""}, "other") is None
+    assert billing_config_error_for({**only, "user_gateway_billing_url": ""}, "gw-m")
+
+
+@pytest.mark.asyncio
+async def test_runner_skips_billing_for_unmatched_model(gw, billing_runtime, bill_user, redis_ok):
+    from app.worker.runner import JobRunner
+
+    async with session_scope() as db:
+        await write_runtime(db, {
+            "user_gateway_billing_only_matched": True,
+            "user_gateway_reasoning_rules": [{"pattern": "gw-other", "billing_override": True}],
+        })
+    job_id = await _job(bill_user, input_path=_input(3), total_items=3)
+    assert await JobRunner(job_id, "w-test").run() == JobStatus.succeeded
+    job = await _get(job_id)
+    assert not job.billing_enabled and job.prompt_tokens == 30
+    assert await _records(job_id) == [] and gw.calls == []
+
+
+@pytest.mark.asyncio
+async def test_runner_bills_with_passthrough_key(gw, billing_runtime, bill_user, redis_ok):
+    from app.worker.runner import JobRunner
+
+    gw.billing_passthrough = True
+    async with session_scope() as db:
+        await write_runtime(db, {"user_gateway_billing_key_passthrough": True,
+                                 "user_gateway_billing_token_encrypted": ""})
+    job_id = await _job(bill_user, input_path=_input(2), total_items=2, billing_enabled=False)
+    assert await JobRunner(job_id, "w-test").run() == JobStatus.succeeded
+    [record] = await _records(job_id)
+    assert record.status == BillingStatus.succeeded and gw.calls[-1]["key"] == "sk-batch"

@@ -225,6 +225,8 @@ class GatewayReasoningRule(BaseModel):
     inference_api_key: str | None = Field(default=None, max_length=1024)
     # 只读：已存 Key 的掩码
     inference_api_key_masked: str | None = None
+    # 透传用户 Key：这个推理接口认用户自己的 Key
+    inference_key_passthrough: bool = False
     # 实际请求推理接口时用的模型名，不展示给用户；留空就用 pattern 命中的模型名本身
     upstream_model: str = Field(default="", max_length=255)
 
@@ -313,6 +315,8 @@ class ModelOptionsOut(BaseModel):
     personal_error: str | None = None
     # 独立计费时用户 Key 的额度
     personal_key: PersonalKeyInfo | None = None
+    # 模型名 -> 是否走计费接口（「仅单独配置的模型计费」打开时不是所有模型都计费）
+    personal_billing: dict[str, bool] = Field(default_factory=dict)
 
 
 class PersonalTokenIn(BaseModel):
@@ -326,6 +330,7 @@ class PersonalModelsOut(BaseModel):
     saved: bool = False
     reasoning: dict[str, PersonalReasoningCap] = Field(default_factory=dict)
     key: PersonalKeyInfo | None = None
+    billing: dict[str, bool] = Field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #
@@ -824,6 +829,9 @@ class SystemSettingsOut(BaseModel):
     user_gateway_billing_token_masked: str | None = None
     user_gateway_billing_interval: int = 60
     user_gateway_billing_require_batch_key: bool = False
+    user_gateway_inference_key_passthrough: bool = False
+    user_gateway_billing_key_passthrough: bool = False
+    user_gateway_billing_only_matched: bool = False
 
     # ---- 单模型同时运行的任务数上限 ----
     model_job_limits: list[ModelJobLimit] = Field(default_factory=list)
@@ -899,6 +907,9 @@ class SystemSettingsUpdate(BaseModel):
     user_gateway_billing_token: str | None = Field(default=None, max_length=1024)
     user_gateway_billing_interval: int | None = Field(default=None, ge=10, le=3600)
     user_gateway_billing_require_batch_key: bool | None = None
+    user_gateway_inference_key_passthrough: bool | None = None
+    user_gateway_billing_key_passthrough: bool | None = None
+    user_gateway_billing_only_matched: bool | None = None
 
     file_retention_days: int | None = Field(default=None, ge=0, le=3650)
     purge_input_files: bool | None = None

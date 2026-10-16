@@ -104,6 +104,7 @@ export default function NewJobPage() {
         ...prev, personal: res.models, personal_error: null,
         personal_reasoning: res.reasoning ?? {},
         personal_key: res.key ?? null,
+        personal_billing: res.billing ?? {},
         has_saved_token: prev.has_saved_token || res.saved,
       })
       setEditingToken(false)
@@ -415,10 +416,12 @@ export default function NewJobPage() {
 
               {selection?.source === 'personal' && (
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  {options?.gateway_billing
+                  {options?.gateway_billing && options.personal_billing?.[selection.key] !== false
                     ? `该任务由平台执行推理，按用量每 ${settings?.user_gateway_billing_interval ?? 60} 秒`
                       + `从你的 ${options?.gateway_label} 账户扣一次费；余额不足时任务会自动暂停，充值后点「继续」即可。并发上限 `
-                    : `该任务将以你的 token 调用 ${options?.gateway_label}，并发上限 `}
+                    : options?.gateway_billing
+                      ? `该模型由平台执行推理、不单独计费，并发上限 `
+                      : `该任务将以你的 token 调用 ${options?.gateway_label}，并发上限 `}
                   {settings?.user_gateway_max_concurrency ?? 4}。
                 </Typography.Text>
               )}

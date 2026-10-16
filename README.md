@@ -54,9 +54,12 @@ Browser ──► API (FastAPI) ──► MySQL / PostgreSQL   (metadata, state)
   after timeouts or crashes never double-charge. A rejected charge (insufficient balance, bad
   Key, …) pauses the job; resuming re-sends the unpaid records first. Admins see every record
   under **Billing records** and can test both endpoints from the settings page. The pre-submit
-  dry run is billed too, and the job is not submitted if that charge fails. An optional
-  "restrict API key" switch rejects any Key whose group (as reported by the gateway's
-  `/api/usage/token/`) is not `batch`
+  dry run is billed too, and the job is not submitted if that charge fails. Both the inference
+  and billing endpoints can pass the user's own Key through instead of a platform key. An
+  optional "restrict API key" switch rejects newly added Keys that aren't in the `batch` group —
+  judged by `group` from `/api/usage/token/` when present, otherwise by a 0-amount billing call.
+  Another switch bills only the models matched by a per-model config with billing routing on;
+  the rest run on the global inference endpoint without billing
 - **Per-model config** for gateway models: besides the reasoning toggle, a rule can turn on
   per-model billing routing — its own inference endpoint / key and a redirect model name (the
   name actually sent upstream, never shown to users; results and dry-run echoes show the
