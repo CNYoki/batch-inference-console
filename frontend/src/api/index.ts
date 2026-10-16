@@ -1,7 +1,7 @@
 import { http } from './client'
 import type {
-  ApiToken, ApiTokenCreated, AuthInfo, Dashboard, DryRunResult, Job, JobErrorRow, JobList, MailTestResult, ModelConfig,
-  ModelOption, ModelOptions, MyUsage, PersonalModels, Project, QueueView, ResultPage, RetentionPreview,
+  ApiToken, ApiTokenCreated, AuthInfo, BillingRecord, BillingRecordList, Dashboard, DryRunResult, Job, JobErrorRow, JobList, MailTestResult, ModelConfig,
+  GatewayTestResult, JobBilling, ModelOption, ModelOptions, MyUsage, PersonalModels, Project, QueueView, ResultPage, RetentionPreview,
   SavedPrompt, SavedPromptInput, ScriptConfig, ScriptPreview, SystemSettings, UploadResult, User,
 } from './types'
 
@@ -143,6 +143,17 @@ export const api = {
   runRetention: () => http.post<RetentionPreview>('/admin/retention/run').then((r) => r.data),
   testMail: (to: string) =>
     http.post<MailTestResult>('/admin/notifications/test', { to }).then((r) => r.data),
+
+  // ---------------- 个人网关计费 ----------------
+  jobBilling: (id: string) => http.get<JobBilling>(`/jobs/${id}/billing`).then((r) => r.data),
+  retryJobBilling: (id: string) =>
+    http.post<JobBilling>(`/jobs/${id}/billing/retry`).then((r) => r.data),
+  billingRecords: (params: {
+    status?: string; username?: string; job_id?: string; page?: number; page_size?: number
+  }) => http.get<BillingRecordList>('/admin/billing/records', { params }).then((r) => r.data),
+  retryBillingRecord: (id: number) =>
+    http.post<BillingRecord>(`/admin/billing/records/${id}/retry`).then((r) => r.data),
+  testGateway: () => http.post<GatewayTestResult>('/admin/billing/test').then((r) => r.data),
 
   // ---------------- 代码生成 ----------------
   splitScript: (config: ScriptConfig) =>

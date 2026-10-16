@@ -18,6 +18,7 @@ import uuid
 from ..config import settings
 from ..db import engine, session_scope
 from ..models import JobStatus
+from ..services import billing
 from ..services.model_limits import job_limit_for, job_model_names
 from ..services.pins import pinned_models, requeue_preempted
 from ..services.queue import CLAIM_BLOCKED, CLAIM_OK, queue
@@ -35,6 +36,7 @@ REAP_SECONDS = 30.0
 # 让崩溃的 worker 先以超时状态露个面，方便发现问题
 DEAD_WORKER_SECONDS = 600.0
 RETENTION_SECONDS = 3600.0   # 保留期清理的扫描间隔
+BILLING_SWEEP_SECONDS = 30.0  # 计费补扣巡检间隔
 # 领任务时每次看队列里多少个、最多往后看多少个。前面的都被单模型上限挡住时往后找
 CLAIM_PAGE = 100
 CLAIM_SCAN_MAX = 2000
@@ -68,6 +70,7 @@ class Worker:
         background = [
             asyncio.create_task(self._reaper_loop()),
             asyncio.create_task(self._retention_loop()),
+            asyncio.create_task(self._billing_loop()),
         ]
         try:
             await self._claim_loop()
@@ -220,6 +223,22 @@ class Worker:
             except Exception as exc:  # noqa: BLE001 — 清理失败不能影响任务执行
                 log.warning("保留期清理失败: %s", exc)
             await asyncio.sleep(RETENTION_SECONDS)
+
+    async def _billing_loop(self) -> None:
+        """个人网关独立计费的补扣：重发失败过的临时错误，补切没在运行的任务的差额。
+
+        运行中的任务由各自的 runner 定期扣费，这里只兜底。同一时刻只让一个 worker 扫，
+        就算两个同时扫也不会重复扣：切记录有乐观锁，发送前要先认领。
+        """
+        while True:
+            await asyncio.sleep(BILLING_SWEEP_SECONDS)
+            try:
+                if await queue.acquire_lock("billing", ttl=int(BILLING_SWEEP_SECONDS) - 5):
+                    result = await billing.sweep()
+                    if result["cut"] or result["sent"]:
+                        log.info("计费巡检：补切 %d 笔，发送 %d 笔", result["cut"], result["sent"])
+            except Exception as exc:  # noqa: BLE001 — 计费巡检失败不能影响任务执行
+                log.warning("计费巡检失败: %s", exc)
 
     async def _reaper_loop(self) -> None:
         """回收租约过期的任务，并清掉心跳早已停止的 worker 记录（持有者进程崩溃/被杀）。"""

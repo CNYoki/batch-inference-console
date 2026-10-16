@@ -27,9 +27,11 @@ Browser ──► API (FastAPI) ──► MySQL / PostgreSQL   (metadata, state)
 - **Switch models mid-job**: a paused, canceled or failed job can be moved to another model;
   resuming sends only the remaining items to the new one
 - Retry just the failed items without re-running the successful ones
-- **Projects**: group your jobs and saved prompts into projects; pick a project when creating a
-  job, filter the job list and "My Prompts" by project, move jobs between projects one at a time
-  or in bulk. Deleting a project keeps its jobs and prompts — they just become unassigned
+- **Projects**: group your jobs and saved prompts into projects; every user has an undeletable
+  default project and every job belongs to a project (picked when creating it — the default one
+  is preselected; API clients that send none land in it). Filter the job list and "My Prompts"
+  by project, move jobs between projects one at a time or in bulk. Deleting a project keeps its
+  contents — jobs move back to the default project, prompts become unassigned
 - **Dry run on submit**: the first line is sent for real before the job is queued, so a wrong
   model name, an expired key or a reasoning field the gateway rejects surfaces in seconds
   instead of after the whole batch has waited in line
@@ -43,6 +45,15 @@ Browser ──► API (FastAPI) ──► MySQL / PostgreSQL   (metadata, state)
   go ahead
 - **Personal gateway**: users supply their own token, the platform fetches the models that token
   is authorised for, and jobs run under their identity and quota
+- **Personal gateway separate billing**: optionally split inference from billing. Users enter a
+  `batch`-group Key (still used to list their models from the gateway URL); jobs run against an
+  admin-configured inference endpoint with the platform's own key, and the worker reports usage
+  to the gateway's `POST /api/batch/billing` every N seconds and again on pause / cancel /
+  completion. Usage is cut into billing records (with a stable `request_id` of
+  `bic-<job>-<seq>`) in the same transaction that advances the job's billed counters, so retries
+  after timeouts or crashes never double-charge. A rejected charge (insufficient balance, bad
+  Key, …) pauses the job; resuming re-sends the unpaid records first. Admins see every record
+  under **Billing records** and can test both endpoints from the settings page
 - Reasoning/thinking toggle per model: pick the request-body fragment from presets
   (`chat_template_kwargs.enable_thinking`, `reasoning_effort`, `thinking.budget_tokens`, …)
   or write your own; effort levels (`none` … `max`, or raw token budgets) are configurable

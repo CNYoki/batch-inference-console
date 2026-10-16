@@ -72,11 +72,13 @@ async def test_project_crud_and_counts(admin_client: AsyncClient):
                                         json={"name": f"{name}-改", "description": None})).json()
     assert updated["name"] == f"{name}-改" and updated["description"] is None
 
-    # 删项目不删内容，只是回到未归类
+    # 删项目不删内容：任务回到默认项目，Prompt 变成未归类
     assert (await admin_client.delete(f"/api/projects/{project['id']}")).status_code == 204
     assert (await admin_client.get(f"/api/projects/{project['id']}")).status_code == 404
+    default = (await admin_client.get("/api/projects")).json()[0]
+    assert default["is_default"] and default["name"] == "默认项目"
     job = (await admin_client.get(f"/api/jobs/{done}")).json()
-    assert job["project_id"] is None and job["name"] == "项目里的任务"
+    assert job["project_id"] == default["id"] and job["name"] == "项目里的任务"
     prompts = (await admin_client.get("/api/prompts", params={"project": "none"})).json()
     assert f"p-{name}" in {p["name"] for p in prompts}
 
@@ -98,13 +100,13 @@ async def test_jobs_filter_and_move_between_projects(admin_client: AsyncClient):
         "/api/jobs", params={"project": "none", "page_size": 100})).json()["items"]}
     assert {j2, j3} <= unassigned and j1 not in unassigned
 
-    # 单个挪动；显式传 null 是移出项目，不传就不改
+    # 单个挪动；显式传 null 是挪回默认项目，不传就不改
     out = (await admin_client.patch(f"/api/jobs/{j2}", json={"project_id": b["id"]})).json()
     assert out["project_id"] == b["id"] and out["project_name"] == b["name"]
     out = (await admin_client.patch(f"/api/jobs/{j2}", json={"name": "j2-改"})).json()
     assert out["project_id"] == b["id"]
     out = (await admin_client.patch(f"/api/jobs/{j2}", json={"project_id": None})).json()
-    assert out["project_id"] is None
+    assert out["project_name"] == "默认项目"
     assert (await admin_client.patch(f"/api/jobs/{j2}", json={"project_id": "nope"})).status_code == 400
 
     # 批量
@@ -173,3 +175,40 @@ async def test_prompt_project_assignment(admin_client: AsyncClient):
 
     await admin_client.delete(f"/api/prompts/{created['id']}")
     await admin_client.delete(f"/api/projects/{project['id']}")
+
+
+@pytest.mark.asyncio
+async def test_every_user_gets_one_undeletable_default_project(admin_client: AsyncClient):
+    other = await _user_client(admin_client, f"defuser-{uuid.uuid4().hex[:6]}")
+    try:
+        first = (await other.get("/api/projects")).json()
+        assert [(p["name"], p["is_default"]) for p in first] == [("默认项目", True)]
+        # 重复取不会多建
+        mine = (await other.post("/api/projects", json={"name": "某科研任务"})).json()
+        listed = (await other.get("/api/projects")).json()
+        assert [p["name"] for p in listed] == ["默认项目", "某科研任务"]
+        assert listed[0]["id"] == first[0]["id"]
+
+        assert (await other.delete(f"/api/projects/{first[0]['id']}")).status_code == 400
+        # 默认项目可以改名，仍是默认项目
+        renamed = (await other.patch(f"/api/projects/{first[0]['id']}", json={"name": "日常"})).json()
+        assert renamed["is_default"]
+        await other.delete(f"/api/projects/{mine['id']}")
+    finally:
+        await other.aclose()
+
+
+@pytest.mark.asyncio
+async def test_job_without_project_goes_to_default(admin_client: AsyncClient):
+    """前端建任务必须选项目；命令行等不传项目的老客户端落到默认项目。"""
+    from app.api.jobs import _check_project
+    from app.db import session_scope
+    from app.models import User
+
+    async with session_scope() as db:
+        from sqlalchemy import select
+
+        admin = (await db.execute(select(User).where(User.username == "admin"))).scalar_one()
+        project_id = await _check_project(db, admin.id, None)
+    default = (await admin_client.get("/api/projects")).json()[0]
+    assert default["is_default"] and project_id == default["id"]

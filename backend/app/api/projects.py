@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from ..core.deps import DB, CurrentUser
 from ..models import Job, JobStatus, Project, User, UserPrompt
 from ..schemas import ProjectCreate, ProjectOut, ProjectUpdate
+from ..services.projects import ensure_default_project
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -51,7 +52,7 @@ async def _with_counts(db: DB, projects: list[Project]) -> list[ProjectOut]:
         )).all())
     return [
         ProjectOut(
-            id=p.id, name=p.name, description=p.description,
+            id=p.id, name=p.name, description=p.description, is_default=p.is_default,
             job_count=jobs.get(p.id, 0), active_job_count=active.get(p.id, 0),
             prompt_count=prompts.get(p.id, 0),
             created_at=p.created_at, updated_at=p.updated_at,
@@ -62,9 +63,14 @@ async def _with_counts(db: DB, projects: list[Project]) -> list[ProjectOut]:
 
 @router.get("", response_model=list[ProjectOut])
 async def list_projects(user: CurrentUser, db: DB) -> list[ProjectOut]:
+    """默认项目排最前，其余按创建时间倒序。"""
+    await ensure_default_project(db, user.id)
+    await db.commit()
     rows = (
         await db.execute(
-            select(Project).where(Project.user_id == user.id).order_by(Project.created_at.desc())
+            select(Project)
+            .where(Project.user_id == user.id)
+            .order_by(Project.is_default.desc(), Project.created_at.desc())
         )
     ).scalars().all()
     return await _with_counts(db, list(rows))
@@ -99,10 +105,13 @@ async def update_project(project_id: str, payload: ProjectUpdate, user: CurrentU
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_project(project_id: str, user: CurrentUser, db: DB) -> None:
-    """删项目不删内容：里面的任务和 Prompt 回到「未归类」。"""
+    """删项目不删内容：里面的任务挪回默认项目，Prompt 变成未归类。默认项目本身不能删。"""
     project = await _get_own_or_404(db, user, project_id)
+    if project.is_default:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "默认项目不能删除")
+    default = await ensure_default_project(db, user.id)
     # 外键虽然是 SET NULL，但不依赖数据库替我们做（SQLite 外键可能没开）
-    await db.execute(update(Job).where(Job.project_id == project.id).values(project_id=None))
+    await db.execute(update(Job).where(Job.project_id == project.id).values(project_id=default.id))
     await db.execute(
         update(UserPrompt).where(UserPrompt.project_id == project.id).values(project_id=None)
     )
