@@ -51,6 +51,8 @@ export default function AdminSystemPage() {
   const [dash, setDash] = useState<Dashboard | null>(null)
   const [usage, setUsage] = useState<UsageRow[]>([])
   const [saving, setSaving] = useState(false)
+  // 展开着的分模型配置（按行号）。规则多了全部展开页面太长，默认折叠
+  const [openRules, setOpenRules] = useState<number[]>([])
   const [settings, setSettings] = useState<SystemSettings | null>(null)
   const [retention, setRetention] = useState<RetentionPreview | null>(null)
   const [storage, setStorage] = useState<MyUsage | null>(null)
@@ -139,7 +141,17 @@ export default function AdminSystemPage() {
   }
 
   const saveSettings = async () => {
-    const values = await form.validateFields()
+    let values
+    try {
+      values = await form.validateFields()
+    } catch (err) {
+      // 校验没过的规则可能正折叠着，不展开用户看不到错在哪
+      const invalid = ((err as { errorFields?: { name: (string | number)[] }[] }).errorFields ?? [])
+        .filter((f) => f.name[0] === 'user_gateway_reasoning_rules')
+        .map((f) => Number(f.name[1]))
+      setOpenRules((prev) => [...new Set([...prev, ...invalid])])
+      return
+    }
     setSaving(true)
     try {
       const s = await api.updateSettings({
@@ -246,6 +258,7 @@ export default function AdminSystemPage() {
       message.success('设置已保存')
     } catch (err) {
       if (err instanceof SyntaxError) {
+        setOpenRules((values.user_gateway_reasoning_rules ?? []).map((_: RuleForm, i: number) => i))
         message.error('JSON 不合法，请检查推理请求参数、分模型配置和 batch 标识')
       }
       // 其余错误由拦截器提示
@@ -623,85 +636,115 @@ export default function AdminSystemPage() {
           <Form.List name="user_gateway_reasoning_rules">
             {(fields, { add, remove }) => (
               <>
-                {fields.map(({ key, name, ...rest }) => (
-                  <div key={key} style={{
-                    border: '1px solid rgba(128,128,128,.25)', borderRadius: 8,
-                    padding: '12px 16px 0', marginBottom: 12,
-                  }}>
-                    <Space size={24} align="start" wrap>
-                      <Form.Item {...rest} name={[name, 'pattern']} label="模型名"
-                        rules={[{ required: true, message: '填模型名或通配符' }]}>
-                        <Input className="mono" placeholder="qwen3-*" style={{ width: 200 }} />
-                      </Form.Item>
-                      <Form.Item {...rest} name={[name, 'enabled']} label="支持推理"
-                        valuePropName="checked"
-                        extra="关掉表示这些模型不支持，用户看不到开关；关闭时的参数照样会附加">
-                        <Switch />
-                      </Form.Item>
-                      <Form.Item {...rest} name={[name, 'preset']} label="请求体写法">
-                        <Select options={PRESET_SELECT_OPTIONS} style={{ width: 300 }}
-                          onChange={(v) => applyRulePreset(name, v)} />
-                      </Form.Item>
-                      <Form.Item label=" " colon={false}>
-                        <Button danger onClick={() => remove(name)}>删除</Button>
-                      </Form.Item>
-                    </Space>
-                    <Space size={24} align="start" wrap>
-                      <Form.Item {...rest} name={[name, 'payload']} label="开启推理时附加的请求参数">
-                        <Input.TextArea rows={3} className="mono" style={{ width: 380 }}
-                          placeholder="{}" />
-                      </Form.Item>
-                      <Form.Item {...rest} name={[name, 'off_payload']} label="关闭推理时附加的请求参数"
-                        extra="用户没打开推理时带上，只对这条规则命中的模型生效；没配规则的模型不带">
-                        <Input.TextArea rows={3} className="mono" style={{ width: 380 }}
-                          placeholder="{}" />
-                      </Form.Item>
-                      <Form.Item {...rest} name={[name, 'effort_options']} label="用户可选的推理档位">
-                        <Select mode="tags" options={EFFORT_LEVEL_OPTIONS}
-                          placeholder="low, medium, high" style={{ width: 240 }} />
-                      </Form.Item>
-                      <Form.Item {...rest} name={[name, 'default_effort']} label="默认档位">
-                        <Select allowClear placeholder="不指定" style={{ width: 140 }}
-                          options={(rules?.[name]?.effort_options ?? [])
-                            .map((v) => ({ value: v, label: v }))} />
-                      </Form.Item>
-                    </Space>
-                    <Form.Item {...rest} name={[name, 'billing_override']} label="模型独立计费"
-                      valuePropName="checked"
-                      extra={billingOn
-                        ? '打开后这些模型可单独指定推理接口和实际请求的模型名；留空的项沿用全局推理接口'
-                        : '全局「独立计费」未开启，这里的配置不会生效'}>
-                      <Switch />
-                    </Form.Item>
-                    {rules?.[name]?.billing_override && (
-                      <Space size={24} align="start" wrap>
-                        <Form.Item {...rest} name={[name, 'inference_base_url']} label="推理接口 URL"
-                          extra="留空用全局推理接口"
-                          rules={[{ pattern: /^https?:\/\//, message: '必须以 http:// 或 https:// 开头' }]}>
-                          <Input className="mono" placeholder="https://inference.example.com/v1" style={{ width: 320 }} />
-                        </Form.Item>
-                        <Form.Item {...rest} name={[name, 'inference_key_passthrough']} label="推理接口 API Key"
-                          valuePropName="checked">
-                          <Switch checkedChildren="透传用户 Key" unCheckedChildren="单独配置" />
-                        </Form.Item>
-                        {!rules?.[name]?.inference_key_passthrough && (
-                          <Form.Item {...rest} name={[name, 'inference_api_key']} label=" " colon={false}
-                            extra={rules?.[name]?.inference_api_key_masked
-                              ? `当前：${rules[name].inference_api_key_masked}，留空表示不修改`
-                              : '留空用全局推理接口的 Key'}>
-                            <Input.Password className="mono" autoComplete="new-password" style={{ width: 260 }}
-                              placeholder={rules?.[name]?.inference_api_key_masked ? '不修改请留空' : 'sk-...'} />
-                          </Form.Item>
+                <Collapse
+                  size="small"
+                  style={{ marginBottom: 12 }}
+                  activeKey={openRules.map(String)}
+                  onChange={(keys) => setOpenRules([keys].flat().map(Number))}
+                  items={fields.map(({ key: _fieldKey, name, ...rest }) => ({
+                    key: String(name),
+                    // 折叠的规则也要挂载表单项，否则保存时 validateFields 取不到它们的值
+                    forceRender: true,
+                    label: (
+                      <Space size={8} wrap>
+                        <span className="mono">{rules?.[name]?.pattern?.trim() || '未填写模型名'}</span>
+                        <Tag color={rules?.[name]?.enabled === false ? 'default' : 'green'}>
+                          {rules?.[name]?.enabled === false ? '不支持推理' : '支持推理'}
+                        </Tag>
+                        {rules?.[name]?.billing_override && <Tag color="blue">模型独立计费</Tag>}
+                        {!!rules?.[name]?.effort_options?.length && (
+                          <Typography.Text type="secondary">
+                            档位：{rules[name].effort_options?.join(' / ')}
+                          </Typography.Text>
                         )}
-                        <Form.Item {...rest} name={[name, 'upstream_model']} label="重定向模型名"
-                          extra="实际请求推理接口时用的模型名，不会展示给用户；留空用原模型名">
-                          <Input className="mono" placeholder="例：Qwen/Qwen3-32B" style={{ width: 240 }} />
-                        </Form.Item>
                       </Space>
-                    )}
-                  </div>
-                ))}
-                <Button type="dashed" onClick={() => add({ enabled: true, payload: '{}', off_payload: '{}' })}
+                    ),
+                    extra: (
+                      <Button danger size="small" onClick={(e) => {
+                        e.stopPropagation()
+                        setOpenRules((prev) => prev.filter((i) => i !== name).map((i) => (i > name ? i - 1 : i)))
+                        remove(name)
+                      }}>删除</Button>
+                    ),
+                    children: (
+                      <>
+                        <Space size={24} align="start" wrap>
+                          <Form.Item {...rest} name={[name, 'pattern']} label="模型名"
+                            rules={[{ required: true, message: '填模型名或通配符' }]}>
+                            <Input className="mono" placeholder="qwen3-*" style={{ width: 200 }} />
+                          </Form.Item>
+                          <Form.Item {...rest} name={[name, 'enabled']} label="支持推理"
+                            valuePropName="checked"
+                            extra="关掉表示这些模型不支持，用户看不到开关；关闭时的参数照样会附加">
+                            <Switch />
+                          </Form.Item>
+                          <Form.Item {...rest} name={[name, 'preset']} label="请求体写法">
+                            <Select options={PRESET_SELECT_OPTIONS} style={{ width: 300 }}
+                              onChange={(v) => applyRulePreset(name, v)} />
+                          </Form.Item>
+                        </Space>
+                        <Space size={24} align="start" wrap>
+                          <Form.Item {...rest} name={[name, 'payload']} label="开启推理时附加的请求参数">
+                            <Input.TextArea rows={3} className="mono" style={{ width: 380 }}
+                              placeholder="{}" />
+                          </Form.Item>
+                          <Form.Item {...rest} name={[name, 'off_payload']} label="关闭推理时附加的请求参数"
+                            extra="用户没打开推理时带上，只对这条规则命中的模型生效；没配规则的模型不带">
+                            <Input.TextArea rows={3} className="mono" style={{ width: 380 }}
+                              placeholder="{}" />
+                          </Form.Item>
+                          <Form.Item {...rest} name={[name, 'effort_options']} label="用户可选的推理档位">
+                            <Select mode="tags" options={EFFORT_LEVEL_OPTIONS}
+                              placeholder="low, medium, high" style={{ width: 240 }} />
+                          </Form.Item>
+                          <Form.Item {...rest} name={[name, 'default_effort']} label="默认档位">
+                            <Select allowClear placeholder="不指定" style={{ width: 140 }}
+                              options={(rules?.[name]?.effort_options ?? [])
+                                .map((v) => ({ value: v, label: v }))} />
+                          </Form.Item>
+                        </Space>
+                        <Form.Item {...rest} name={[name, 'billing_override']} label="模型独立计费"
+                          valuePropName="checked"
+                          extra={billingOn
+                            ? '打开后这些模型可单独指定推理接口和实际请求的模型名；留空的项沿用全局推理接口'
+                            : '全局「独立计费」未开启，这里的配置不会生效'}>
+                          <Switch />
+                        </Form.Item>
+                        {rules?.[name]?.billing_override && (
+                          <Space size={24} align="start" wrap>
+                            <Form.Item {...rest} name={[name, 'inference_base_url']} label="推理接口 URL"
+                              extra="留空用全局推理接口"
+                              rules={[{ pattern: /^https?:\/\//, message: '必须以 http:// 或 https:// 开头' }]}>
+                              <Input className="mono" placeholder="https://inference.example.com/v1" style={{ width: 320 }} />
+                            </Form.Item>
+                            <Form.Item {...rest} name={[name, 'inference_key_passthrough']} label="推理接口 API Key"
+                              valuePropName="checked">
+                              <Switch checkedChildren="透传用户 Key" unCheckedChildren="单独配置" />
+                            </Form.Item>
+                            {!rules?.[name]?.inference_key_passthrough && (
+                              <Form.Item {...rest} name={[name, 'inference_api_key']} label=" " colon={false}
+                                extra={rules?.[name]?.inference_api_key_masked
+                                  ? `当前：${rules[name].inference_api_key_masked}，留空表示不修改`
+                                  : '留空用全局推理接口的 Key'}>
+                                <Input.Password className="mono" autoComplete="new-password" style={{ width: 260 }}
+                                  placeholder={rules?.[name]?.inference_api_key_masked ? '不修改请留空' : 'sk-...'} />
+                              </Form.Item>
+                            )}
+                            <Form.Item {...rest} name={[name, 'upstream_model']} label="重定向模型名"
+                              extra="实际请求推理接口时用的模型名，不会展示给用户；留空用原模型名">
+                              <Input className="mono" placeholder="例：Qwen/Qwen3-32B" style={{ width: 240 }} />
+                            </Form.Item>
+                          </Space>
+                        )}
+                      </>
+                    ),
+                  }))}
+                />
+                <Button type="dashed"
+                  onClick={() => {
+                    setOpenRules((prev) => [...prev, fields.length])
+                    add({ enabled: true, payload: '{}', off_payload: '{}' })
+                  }}
                   style={{ marginBottom: 16 }}>
                   + 添加模型配置
                 </Button>
