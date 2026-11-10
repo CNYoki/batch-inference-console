@@ -391,6 +391,7 @@ class JobOut(BaseModel):
 
     created_at: datetime
     files_purged_at: datetime | None = None
+    archived_at: datetime | None = None
     queued_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -527,6 +528,19 @@ class JobBatchProject(BaseModel):
 
 class JobBatchProjectOut(BaseModel):
     updated: int
+
+
+class JobBatchAction(BaseModel):
+    """对一批任务执行同一个操作；状态不符合的任务跳过，不影响其余任务。"""
+
+    job_ids: list[str] = Field(min_length=1, max_length=500)
+    action: Literal["pause", "resume", "archive"]
+
+
+class JobBatchActionOut(BaseModel):
+    succeeded: int
+    skipped: int
+    failed: int
 
 
 class QueueReorder(BaseModel):

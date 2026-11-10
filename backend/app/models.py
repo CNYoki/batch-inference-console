@@ -334,6 +334,9 @@ class Job(Base, TimestampMixin):
     # 文件被保留期策略清除的时间。非空即表示输入/结果文件已不在磁盘上，
     # 但任务记录与用量统计仍然保留
     files_purged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 归档时间（软删除）。非空的任务对提交者不可见，输入/结果文件在归档时一并清除，
+    # 任务记录与用量统计保留
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

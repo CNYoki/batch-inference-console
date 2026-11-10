@@ -6,7 +6,7 @@ import {
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import {
-  ArrowLeftOutlined, DeleteOutlined, DownloadOutlined, FolderOutlined, PauseCircleOutlined,
+  ArrowLeftOutlined, DownloadOutlined, FolderOutlined, InboxOutlined, PauseCircleOutlined,
   PlayCircleOutlined, PushpinFilled, PushpinOutlined, ReloadOutlined, StopOutlined, SwapOutlined,
 } from '@ant-design/icons'
 import { api, downloadUrl } from '../api'
@@ -192,13 +192,13 @@ export default function JobDetailPage() {
                 <Button danger icon={<StopOutlined />}
                   onClick={() => void act(() => api.cancelJob(job.id), '已请求取消')}>取消</Button>
               )}
-              {finished && (
-                <Button danger icon={<DeleteOutlined />} onClick={() => modal.confirm({
-                  title: '删除该任务？',
-                  content: '任务记录、输入文件与结果都会被永久删除。',
-                  okText: '删除', okButtonProps: { danger: true }, cancelText: '取消',
-                  onOk: async () => { await api.deleteJob(job.id); navigate(listUrl) },
-                })}>删除</Button>
+              {(finished || job.status === 'paused') && !job.archived_at && (
+                <Button danger icon={<InboxOutlined />} onClick={() => modal.confirm({
+                  title: '归档该任务？',
+                  content: '归档后任务不再显示，输入文件与结果会被永久清除，无法下载、恢复或重试。',
+                  okText: '归档', okButtonProps: { danger: true }, cancelText: '取消',
+                  onOk: async () => { await api.archiveJob(job.id); navigate(listUrl) },
+                })}>归档</Button>
               )}
             </Space>
           </Col>

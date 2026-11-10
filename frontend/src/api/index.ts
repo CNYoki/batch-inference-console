@@ -119,7 +119,10 @@ export const api = {
   pauseAllJobs: () =>
     http.post<{ paused: number; signaled: number; failed: number }>('/jobs/pause-all')
       .then((r) => r.data),
-  deleteJob: (id: string) => http.delete(`/jobs/${id}`),
+  archiveJob: (id: string) => http.post(`/jobs/${id}/archive`),
+  batchJobs: (job_ids: string[], action: 'pause' | 'resume' | 'archive') =>
+    http.post<{ succeeded: number; skipped: number; failed: number }>('/jobs/batch-action', { job_ids, action })
+      .then((r) => r.data),
 
   // ---------------- 用户 ----------------
   users: (params: { page?: number; page_size?: number; keyword?: string }) =>

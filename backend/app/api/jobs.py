@@ -37,6 +37,8 @@ from ..models import (
     UserRole,
 )
 from ..schemas import (
+    JobBatchAction,
+    JobBatchActionOut,
     JobBatchProject,
     JobBatchProjectOut,
     JobBillingOut,
@@ -79,6 +81,8 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9_.\-一-鿿]+")
 CHUNK = 1024 * 1024
+# 还有 worker 或队列在用这些任务的文件，不能清
+_NOT_ARCHIVABLE = {JobStatus.pending, JobStatus.queued, JobStatus.running}
 
 
 def _upload_path(user_id: str, upload_id: str) -> Path:
@@ -87,17 +91,23 @@ def _upload_path(user_id: str, upload_id: str) -> Path:
 
 
 def _can_access(user: User, job: Job) -> bool:
-    return user.role == UserRole.admin or job.user_id == user.id
+    """归档的任务对提交者不可见；管理员仍能打开（计费记录要能追溯到任务）。"""
+    return user.role == UserRole.admin or (job.user_id == user.id and job.archived_at is None)
 
 
-async def _get_job_or_404(db: DB, user: User, job_id: str) -> Job:
-    job = (
+async def _load_job(db: DB, job_id: str) -> Job | None:
+    return (
         await db.execute(
             select(Job)
             .options(selectinload(Job.model_config), selectinload(Job.user), selectinload(Job.project))
             .where(Job.id == job_id)
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
+
+
+async def _get_job_or_404(db: DB, user: User, job_id: str) -> Job:
+    job = await _load_job(db, job_id)
     if job is None or not _can_access(user, job):
         # 无权访问也返回 404，不泄露任务是否存在
         raise HTTPException(status.HTTP_404_NOT_FOUND, "任务不存在")
@@ -164,6 +174,7 @@ def _to_out(job: Job, queue_position: int | None = None, live: dict[str, str] | 
         worker_id=job.worker_id,
         created_at=job.created_at,
         files_purged_at=job.files_purged_at,
+        archived_at=job.archived_at,
         queued_at=job.queued_at,
         started_at=job.started_at,
         finished_at=job.finished_at,
@@ -507,6 +518,8 @@ async def list_jobs(
     )
     count_stmt = select(func.count(Job.id))
 
+    stmt = stmt.where(Job.archived_at.is_(None))
+    count_stmt = count_stmt.where(Job.archived_at.is_(None))
     if user.role != UserRole.admin or mine:
         stmt = stmt.where(Job.user_id == user.id)
         count_stmt = count_stmt.where(Job.user_id == user.id)
@@ -813,7 +826,9 @@ async def move_jobs_to_project(payload: JobBatchProject, user: CurrentUser, db: 
     """把自己的一批任务挪进某个项目；project_id 为空表示挪回默认项目。"""
     project_id = await _check_project(db, user.id, payload.project_id)
     jobs = (
-        await db.execute(select(Job).where(Job.id.in_(payload.job_ids), Job.user_id == user.id))
+        await db.execute(
+            select(Job).where(Job.id.in_(payload.job_ids), Job.user_id == user.id, Job.archived_at.is_(None))
+        )
     ).scalars().all()
     for job in jobs:
         job.project_id = project_id
@@ -938,17 +953,16 @@ async def pause_job(job_id: str, user: CurrentUser, db: DB) -> JobOut:
     return _to_out(job)
 
 
-@router.post("/{job_id}/resume", response_model=JobOut)
-async def resume_job(job_id: str, user: CurrentUser, db: DB) -> JobOut:
-    """恢复暂停/失败的任务；已完成的条目不会重复计费。"""
-    job = await _get_job_or_404(db, user, job_id)
+def _resume_blocker(job: Job) -> str | None:
+    """任务不能恢复的原因；可以恢复时返回 None。"""
     if job.status not in {JobStatus.paused, JobStatus.failed, JobStatus.canceled}:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "只有已暂停/失败/已取消的任务可以恢复")
+        return "只有已暂停/失败/已取消的任务可以恢复"
     if job.files_purged_at or not Path(job.input_path).exists():
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "输入文件已超过保留期被清理，无法恢复；请重新上传数据新建任务"
-        )
+        return "输入文件已超过保留期被清理，无法恢复；请重新上传数据新建任务"
+    return None
 
+
+async def _resume(job: Job, db: DB) -> None:
     await queue.clear_signal(job.id)
     job.status = JobStatus.queued
     job.error = None
@@ -959,6 +973,15 @@ async def resume_job(job_id: str, user: CurrentUser, db: DB) -> JobOut:
     if job.pinned:
         # 置顶任务暂停期间别的任务用上了这个模型，恢复时重新抢占
         await preempt_for(db, queue, job.id)
+
+
+@router.post("/{job_id}/resume", response_model=JobOut)
+async def resume_job(job_id: str, user: CurrentUser, db: DB) -> JobOut:
+    """恢复暂停/失败的任务；已完成的条目不会重复计费。"""
+    job = await _get_job_or_404(db, user, job_id)
+    if blocker := _resume_blocker(job):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, blocker)
+    await _resume(job, db)
 
     await db.refresh(job, ["user", "model_config", "project"])
     return _to_out(job, await _safe_position(job.id))
@@ -1045,22 +1068,80 @@ async def retry_failed(job_id: str, user: CurrentUser, db: DB) -> JobOut:
     return _to_out(job, await _safe_position(job.id))
 
 
-@router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_job(job_id: str, user: CurrentUser, db: DB) -> None:
-    job = await _get_job_or_404(db, user, job_id)
-    if job.status in {JobStatus.running, JobStatus.queued}:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "请先取消任务再删除")
+def _can_archive(job: Job) -> bool:
+    return job.archived_at is None and job.status not in _NOT_ARCHIVABLE
 
-    input_path = job.input_path
+
+async def _archive(job: Job, db: DB) -> None:
+    """软删除：任务记录和用量保留，文件全部清除。不提供硬删除，计费与统计才能追溯。"""
+    job_id, input_path = job.id, job.input_path
     if job.billing_enabled:
-        # 任务删了，没切出来的用量也要先记下来，计费记录不随任务删除
-        await billing.cut(db, job.id)
-        job = await _get_job_or_404(db, user, job_id)
-    await db.delete(job)
+        # 归档后用户点不到这个任务了，没切出来的用量先记下来
+        await billing.cut(db, job_id)
+        await db.refresh(job)
+
+    now = datetime.now(UTC)
+    job.archived_at = now
+    job.files_purged_at = job.files_purged_at or now
+    # 暂停中的置顶任务会一直挡着同模型的其他任务
+    job.pinned = False
     await db.commit()
-    await queue.remove(job_id)
-    await queue.clear_signal(job_id)
+
+    # 库里已经归档，文件必须清；排队信息只是兜底，Redis 抖动不影响结果
     results_svc.delete_job_files(job_id, input_path)
+    try:
+        await queue.remove(job_id)
+        await queue.clear_signal(job_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("清理已归档任务 %s 的队列信息失败: %s", job_id, exc)
+
+
+@router.post("/{job_id}/archive", status_code=status.HTTP_204_NO_CONTENT)
+async def archive_job(job_id: str, user: CurrentUser, db: DB) -> None:
+    job = await _get_job_or_404(db, user, job_id)
+    if job.archived_at is not None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "任务已归档")
+    if not _can_archive(job):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "请先暂停或取消任务再归档")
+    await _archive(job, db)
+
+
+async def _apply_batch_action(job: Job, action: str, db: DB) -> bool:
+    """执行一个批量操作；任务状态不符合时返回 False。"""
+    if action == "pause":
+        if job.status not in {JobStatus.running, JobStatus.queued}:
+            return False
+        await _pause(job, db)
+    elif action == "resume":
+        if _resume_blocker(job):
+            return False
+        await _resume(job, db)
+    else:
+        if not _can_archive(job):
+            return False
+        await _archive(job, db)
+    return True
+
+
+@router.post("/batch-action", response_model=JobBatchActionOut)
+async def batch_job_action(payload: JobBatchAction, user: CurrentUser, db: DB) -> JobBatchActionOut:
+    """批量暂停/恢复/归档。无权访问、已归档或状态不符合的任务计入 skipped。"""
+    succeeded = skipped = failed = 0
+    for job_id in dict.fromkeys(payload.job_ids):
+        try:
+            job = await _load_job(db, job_id)
+            if job is None or job.archived_at is not None or not _can_access(user, job):
+                skipped += 1
+            elif await _apply_batch_action(job, payload.action, db):
+                succeeded += 1
+            else:
+                skipped += 1
+        except Exception:
+            # 一个失败不该挡住其余任务
+            log.exception("批量操作 %s 任务 %s 失败", payload.action, job_id)
+            await db.rollback()
+            failed += 1
+    return JobBatchActionOut(succeeded=succeeded, skipped=skipped, failed=failed)
 
 
 # --------------------------------------------------------------------------- #

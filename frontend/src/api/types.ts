@@ -168,6 +168,7 @@ export interface Job {
   created_at: string
   // 非空表示输入/结果文件已因超过保留期被清理，任务记录仍在
   files_purged_at?: string | null
+  archived_at?: string | null
   queued_at?: string | null
   started_at?: string | null
   finished_at?: string | null

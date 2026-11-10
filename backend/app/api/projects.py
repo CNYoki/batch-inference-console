@@ -38,7 +38,9 @@ async def _with_counts(db: DB, projects: list[Project]) -> list[ProjectOut]:
     prompts: dict[str, int] = {}
     if ids:
         jobs = dict((await db.execute(
-            select(Job.project_id, func.count(Job.id)).where(Job.project_id.in_(ids)).group_by(Job.project_id)
+            select(Job.project_id, func.count(Job.id))
+            .where(Job.project_id.in_(ids), Job.archived_at.is_(None))
+            .group_by(Job.project_id)
         )).all())
         active = dict((await db.execute(
             select(Job.project_id, func.count(Job.id))

@@ -6,7 +6,7 @@ import {
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import {
-  DeleteOutlined, DownloadOutlined, FolderOutlined, MoreOutlined, PauseCircleOutlined,
+  DownloadOutlined, FolderOutlined, InboxOutlined, MoreOutlined, PauseCircleOutlined,
   PlayCircleOutlined, PlusOutlined, PushpinFilled, PushpinOutlined, ReloadOutlined, StopOutlined,
 } from '@ant-design/icons'
 import { api, downloadUrl } from '../api'
@@ -21,6 +21,8 @@ import { ACTIVE_STATUSES, STATUS_LABEL, formatDateTime, formatDuration, formatNu
 const STATUS_OPTIONS = (Object.keys(STATUS_LABEL) as JobStatus[]).map((s) => ({
   value: s, label: STATUS_LABEL[s],
 }))
+
+const ARCHIVE_WARNING = '归档后任务不再显示，输入文件与结果会被永久清除，无法下载、恢复或重试。'
 
 export default function JobsPage() {
   const navigate = useNavigate()
@@ -102,12 +104,38 @@ export default function JobsPage() {
     }
   }
 
-  const confirmDelete = (job: Job) => {
+  const confirmArchive = (job: Job) => {
     modal.confirm({
-      title: `删除任务「${job.name}」？`,
-      content: '任务记录、上传的输入文件与已生成的结果都会被永久删除，此操作不可撤销。',
-      okText: '删除', okButtonProps: { danger: true }, cancelText: '取消',
-      onOk: () => act(() => api.deleteJob(job.id), '已删除'),
+      title: `归档任务「${job.name}」？`,
+      content: ARCHIVE_WARNING,
+      okText: '归档', okButtonProps: { danger: true }, cancelText: '取消',
+      onOk: () => act(() => api.archiveJob(job.id), '已归档'),
+    })
+  }
+
+  const runBatch = async (action: 'pause' | 'resume' | 'archive', label: string) => {
+    try {
+      const { succeeded, skipped, failed } = await api.batchJobs(selected, action)
+      const notes = [
+        skipped ? `跳过 ${skipped} 个（状态不符合）` : '',
+        failed ? `失败 ${failed} 个` : '',
+      ].filter(Boolean)
+      const text = [`已${label} ${succeeded} 个任务`, ...notes].join('，')
+      if (failed) message.warning(text)
+      else message.success(text)
+      setSelected([])
+      await load()
+    } catch {
+      // 拦截器已提示
+    }
+  }
+
+  const confirmBatchArchive = () => {
+    modal.confirm({
+      title: `归档选中的 ${selected.length} 个任务？`,
+      content: `${ARCHIVE_WARNING}排队中或运行中的任务会被跳过。`,
+      okText: '归档', okButtonProps: { danger: true }, cancelText: '取消',
+      onOk: () => runBatch('archive', '归档'),
     })
   }
 
@@ -195,6 +223,7 @@ export default function JobsPage() {
         const canPause = job.status === 'running' || job.status === 'queued'
         const canResume = ['paused', 'failed', 'canceled'].includes(job.status)
         const canCancel = !['succeeded', 'completed', 'failed', 'canceled'].includes(job.status)
+        const canArchive = !['pending', 'queued', 'running'].includes(job.status)
         const finished = ['succeeded', 'completed', 'canceled'].includes(job.status)
         const purged = !!job.files_purged_at
         // 结果文件在任务跑动时一直被追加写入，跑完之前不给下载
@@ -221,7 +250,7 @@ export default function JobsPage() {
                 ...(isAdmin && job.pinned
                   ? [{ key: 'unpin', icon: <PushpinOutlined />, label: '取消置顶' }] : []),
                 ...(canCancel ? [{ key: 'cancel', icon: <StopOutlined />, label: '取消', danger: true }] : []),
-                ...(!canCancel ? [{ key: 'delete', icon: <DeleteOutlined />, label: '删除', danger: true }] : []),
+                ...(canArchive ? [{ key: 'archive', icon: <InboxOutlined />, label: '归档', danger: true }] : []),
               ],
               onClick: ({ key, domEvent }) => {
                 domEvent.stopPropagation()
@@ -234,7 +263,7 @@ export default function JobsPage() {
                 if (key === 'pin') confirmPin(job)
                 if (key === 'unpin') void act(() => api.unpinJob(job.id), '已取消置顶')
                 if (key === 'cancel') void act(() => api.cancelJob(job.id), '已请求取消')
-                if (key === 'delete') confirmDelete(job)
+                if (key === 'archive') confirmArchive(job)
               },
             }}
           >
@@ -274,9 +303,14 @@ export default function JobsPage() {
           onChange={(v) => updateQuery({ project: v })}
         />
         {selected.length > 0 && (
-          <Button icon={<FolderOutlined />} onClick={() => setMoving({ ids: selected })}>
-            将选中的 {selected.length} 个任务归入项目
-          </Button>
+          <Space wrap>
+            <Typography.Text type="secondary">已选 {selected.length} 个</Typography.Text>
+            <Button icon={<PauseCircleOutlined />} onClick={() => void runBatch('pause', '暂停')}>暂停</Button>
+            <Button icon={<PlayCircleOutlined />} onClick={() => void runBatch('resume', '恢复')}>恢复</Button>
+            <Button danger icon={<InboxOutlined />} onClick={confirmBatchArchive}>归档</Button>
+            <Button icon={<FolderOutlined />} onClick={() => setMoving({ ids: selected })}>归入项目</Button>
+            <Button type="link" onClick={() => setSelected([])}>清空选择</Button>
+          </Space>
         )}
         {isAdmin && (
           <Space>
@@ -295,7 +329,7 @@ export default function JobsPage() {
         rowSelection={{
           selectedRowKeys: selected,
           onChange: (keys) => setSelected(keys as string[]),
-          // 项目只对本人可见，只能归类自己的任务
+          // 批量操作只针对自己的任务：项目只对本人可见，别人的任务也不该被顺手归档
           getCheckboxProps: (job) => ({ disabled: job.user_id !== user?.id }),
           preserveSelectedRowKeys: true,
         }}
