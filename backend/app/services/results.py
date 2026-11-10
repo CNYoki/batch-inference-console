@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import settings
-from .inference import cached_tokens_of, extract_output_text
+from .inference import cached_tokens_of, extract_output_text, extract_preview_text
 
 log = logging.getLogger(__name__)
 
@@ -172,7 +172,7 @@ def read_page(job_id: str, offset: int = 0, limit: int = 50, only_errors: bool =
                     {
                         "index": obj.get("_index"),
                         "custom_id": obj.get("custom_id"),
-                        "output": extract_output_text(body) if body else None,
+                        "output": extract_preview_text(body) if body else None,
                         "error": (obj.get("error") or {}).get("message"),
                         "status_code": (obj.get("response") or obj.get("error") or {}).get("status_code"),
                         "attempts": obj.get("attempts"),

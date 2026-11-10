@@ -5,8 +5,10 @@
                        "body": {"model": "...", "messages": [...]}}
 2. 精简 messages：    {"custom_id": "a", "messages": [{"role": "user", "content": "..."}]}
 3. 纯 prompt：        {"custom_id": "a", "prompt": "你好"}  /  {"prompt": "你好"}
+4. Embedding：        {"custom_id": "a", "input": "你好"}  或  {"custom_id": "a", "body": {"input": ["a", "b"]}}
 
-统一归一化为 {"custom_id": str, "body": {...}}，body 为 OpenAI /chat/completions 请求体。
+统一归一化为 {"custom_id": str, "body": {...}}，body 为 OpenAI /chat/completions 请求体；
+只有 input、没有 messages 的是 /embeddings 请求体。
 """
 from __future__ import annotations
 
@@ -37,6 +39,28 @@ class ValidationResult:
     preview: list[dict[str, Any]]
 
 
+def is_embedding_body(body: dict[str, Any]) -> bool:
+    """只有 input、没有 messages 的请求体走 /embeddings。"""
+    return "input" in body and "messages" not in body
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _valid_embedding_input(value: Any) -> bool:
+    """OpenAI 接受：字符串、字符串数组、token 数组、token 数组的数组，都不能为空。"""
+    if isinstance(value, str):
+        return bool(value.strip())
+    if not isinstance(value, list) or not value:
+        return False
+    return (
+        all(isinstance(v, str) and v.strip() for v in value)
+        or all(_is_int(v) for v in value)
+        or all(isinstance(v, list) and v and all(_is_int(t) for t in v) for v in value)
+    )
+
+
 def normalize_line(raw: str, index: int) -> ParsedItem:
     """把一行 JSONL 归一化成 ParsedItem，失败抛 JsonlError。"""
     try:
@@ -52,7 +76,7 @@ def normalize_line(raw: str, index: int) -> ParsedItem:
     body = obj.get("body")
     if isinstance(body, dict):
         pass
-    elif "messages" in obj:
+    elif "messages" in obj or "input" in obj:
         body = {k: v for k, v in obj.items() if k not in {"custom_id", "id", "method", "url"}}
     elif "prompt" in obj:
         prompt = obj["prompt"]
@@ -61,7 +85,12 @@ def normalize_line(raw: str, index: int) -> ParsedItem:
         body = {k: v for k, v in obj.items() if k not in {"custom_id", "id", "method", "url", "prompt"}}
         body["messages"] = [{"role": "user", "content": prompt}]
     else:
-        raise JsonlError(f"第 {index + 1} 行缺少 body / messages / prompt 字段")
+        raise JsonlError(f"第 {index + 1} 行缺少 body / messages / prompt / input 字段")
+
+    if is_embedding_body(body):
+        if not _valid_embedding_input(body["input"]):
+            raise JsonlError(f"第 {index + 1} 行的 input 必须是非空字符串、字符串数组或 token 数组")
+        return ParsedItem(index=index, custom_id=custom_id, body=body)
 
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:

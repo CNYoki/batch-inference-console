@@ -151,13 +151,18 @@ writes `DATABASE_URL` back into `.env`.
 
 ## Input format
 
-One JSON object per line. All three shapes are accepted and may be mixed:
+One JSON object per line. All of these shapes are accepted and may be mixed:
 
 ```jsonl
 {"custom_id": "req-1", "method": "POST", "url": "/v1/chat/completions", "body": {"messages": [{"role": "user", "content": "Summarise this."}]}}
 {"custom_id": "req-2", "messages": [{"role": "user", "content": "…"}], "temperature": 0.2}
 {"custom_id": "req-3", "prompt": "Write a haiku"}
+{"custom_id": "req-4", "input": "Text to embed"}
 ```
+
+A line with `input` and no `messages` is sent to the model's `/embeddings` endpoint. Only `dimensions`,
+`encoding_format` and `user` are taken from job-level parameters for these lines. The result preview shows the
+vector's size, and the JSONL/CSV exports contain the full vector.
 
 The first is byte-compatible with the OpenAI Batch API, so existing datasets work as-is.
 `custom_id` is optional but strongly recommended — it is how results map back to your source rows.

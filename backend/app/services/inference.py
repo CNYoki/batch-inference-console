@@ -14,11 +14,15 @@ import httpx
 
 from ..core.security import decrypt_secret
 from ..models import ModelConfig
+from .jsonl import is_embedding_body
 
 log = logging.getLogger(__name__)
 
 # 这些参数不允许用户从 JSONL 里带进来覆盖（由平台/模型配置决定）
 _PROTECTED_BODY_KEYS = {"model", "stream", "stream_options"}
+
+# /embeddings 能接受的任务级参数。temperature、推理片段这些是对话参数，发过去可能被拒
+_EMBEDDING_PARAM_KEYS = {"dimensions", "encoding_format", "user"}
 
 RETRIABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 529}
 
@@ -182,6 +186,15 @@ def build_request_body(
     """把单条输入与任务级参数合成最终请求体。"""
     body: dict[str, Any] = {k: v for k, v in item_body.items() if k not in _PROTECTED_BODY_KEYS}
 
+    if is_embedding_body(body):
+        forced = set((mc.forced_params or {}).keys())
+        for key, value in resolved.items():
+            if (key in _EMBEDDING_PARAM_KEYS and key not in body) or key in forced:
+                body[key] = value
+        body["model"] = mc.model_name
+        body.update(getattr(mc, "body_marker", None) or {})
+        return body
+
     messages = list(body.get("messages") or [])
     # 已经有 system 消息时不重复注入，避免与用户数据打架
     if system_prompt and mc.supports_system_prompt and not any(
@@ -204,9 +217,27 @@ def build_request_body(
     return body
 
 
+def _embedding_input_chars(value: Any) -> int:
+    """input 里的字符数；token 数组按每个 token 4 字符折算。"""
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, list):
+        return sum(_embedding_input_chars(v) for v in value)
+    return 4
+
+
+def embeddings_endpoint(path: str) -> str:
+    """由模型配置的端点推出 embeddings 端点；自建路径无从推断，保持原样。"""
+    stripped = path.rstrip("/")
+    for suffix in ("chat/completions", "completions"):
+        if stripped.endswith(suffix):
+            return stripped[: -len(suffix)] + "embeddings"
+    return path
+
+
 def estimate_tokens(body: dict[str, Any]) -> int:
     """粗略估算 token 数用于 TPM 限流（约 4 字符 = 1 token）。"""
-    chars = 0
+    chars = _embedding_input_chars(body["input"]) if is_embedding_body(body) else 0
     for m in body.get("messages") or []:
         content = m.get("content")
         if isinstance(content, str):
@@ -221,7 +252,9 @@ class InferenceClient:
 
     def __init__(self, mc: ModelConfig) -> None:
         self.mc = mc
-        self.url = mc.base_url.rstrip("/") + "/" + mc.endpoint_path.lstrip("/")
+        base = mc.base_url.rstrip("/") + "/"
+        self.url = base + mc.endpoint_path.lstrip("/")
+        self.embeddings_url = base + embeddings_endpoint(mc.endpoint_path).lstrip("/")
         self.limiter = RateLimiter(mc.rpm_limit, mc.tpm_limit)
 
         headers = {"Content-Type": "application/json", **(mc.extra_headers or {})}
@@ -248,6 +281,9 @@ class InferenceClient:
     async def __aexit__(self, *exc: object) -> None:
         await self.aclose()
 
+    def _url_for(self, body: dict[str, Any]) -> str:
+        return self.embeddings_url if is_embedding_body(body) else self.url
+
     async def complete(self, body: dict[str, Any]) -> InferenceResult:
         est = estimate_tokens(body)
         last_error: InferenceError | None = None
@@ -256,7 +292,7 @@ class InferenceClient:
         for attempt in range(1, self.mc.max_retries + 2):
             await self.limiter.acquire(est)
             try:
-                resp = await self._client.post(self.url, json=body)
+                resp = await self._client.post(self._url_for(body), json=body)
             except httpx.TimeoutException as exc:
                 last_error = InferenceError(f"请求超时: {exc}", None, retriable=True)
             except httpx.HTTPError as exc:
@@ -306,7 +342,7 @@ class InferenceClient:
         """
         started = time.monotonic()
         try:
-            resp = await self._client.post(self.url, json=body)
+            resp = await self._client.post(self._url_for(body), json=body)
         except httpx.TimeoutException as exc:
             return {"ok": False, "latency_ms": _elapsed_ms(started), "error": f"请求超时: {exc}"}
         except httpx.HTTPError as exc:
@@ -326,7 +362,7 @@ class InferenceClient:
 
         out["response"] = data
         if out["ok"]:
-            out["content"] = extract_output_text(data)
+            out["content"] = extract_preview_text(data)
             out["usage"] = data.get("usage") or {}
         else:
             # 网关的报错信息通常嵌在 error.message 里，挑出来当主提示
@@ -337,12 +373,15 @@ class InferenceClient:
 
     async def probe(self) -> dict[str, Any]:
         """后台「测试连通性」用：发一条最小请求。"""
-        body = {
-            "model": self.mc.model_name,
-            "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 8,
-            "stream": False,
-        }
+        if self.mc.endpoint_path.rstrip("/").endswith("embeddings"):
+            body: dict[str, Any] = {"model": self.mc.model_name, "input": "ping"}
+        else:
+            body = {
+                "model": self.mc.model_name,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 8,
+                "stream": False,
+            }
         body.update({k: v for k, v in (self.mc.forced_params or {}).items()})
         started = time.monotonic()
         resp = await self._client.post(self.url, json=body)
@@ -370,15 +409,43 @@ def _brief(data: Any) -> Any:
     """成功探测只回传关键信息，避免把整段回复塞进后台页面。"""
     if not isinstance(data, dict):
         return data
+    vectors = _embedding_vectors(data)
     choices = data.get("choices") or []
-    text = ""
+    text = extract_preview_text(data) if vectors else ""
     if choices and isinstance(choices[0], dict):
         text = (choices[0].get("message") or {}).get("content") or ""
     return {"model": data.get("model"), "usage": data.get("usage"), "sample": str(text)[:200]}
 
 
+def _embedding_vectors(response: dict[str, Any]) -> list[Any] | None:
+    """/embeddings 响应里的向量（按 index 排序）；不是这种响应时返回 None。"""
+    data = response.get("data")
+    if not isinstance(data, list) or not data:
+        return None
+    if not all(isinstance(d, dict) and "embedding" in d for d in data):
+        return None
+    ordered = sorted(data, key=lambda d: d.get("index") or 0)
+    return [d["embedding"] for d in ordered]
+
+
+def extract_preview_text(response: dict[str, Any]) -> str:
+    """给人看的正文：向量只显示维度和开头几个值，几千个浮点数塞进页面没有意义。"""
+    vectors = _embedding_vectors(response)
+    if vectors is None:
+        return extract_output_text(response)
+    first = vectors[0]
+    if isinstance(first, str):
+        return f"[{len(vectors)} 条向量，base64，{len(first)} 字符]"
+    head = ", ".join(str(v) for v in first[:4])
+    return f"[{len(vectors)} 条向量，{len(first)} 维] {head}, …"
+
+
 def extract_output_text(response: dict[str, Any]) -> str:
-    """从 OpenAI 兼容响应里取出正文，供导出 CSV / 预览使用。"""
+    """从 OpenAI 兼容响应里取出正文，供导出 CSV 使用；向量输出为完整的 JSON 文本。"""
+    vectors = _embedding_vectors(response)
+    if vectors is not None:
+        value = vectors[0] if len(vectors) == 1 else vectors
+        return value if isinstance(value, str) else json.dumps(value, separators=(",", ":"))
     choices = response.get("choices") or []
     if not choices or not isinstance(choices[0], dict):
         return ""
