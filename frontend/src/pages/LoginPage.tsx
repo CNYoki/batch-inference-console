@@ -37,8 +37,9 @@ export default function LoginPage() {
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
+      padding: 16, boxSizing: 'border-box',
       background: 'linear-gradient(135deg, #1d39c4 0%, #2f54eb 45%, #597ef7 100%)' }}>
-      <Card style={{ width: 400 }} styles={{ body: { padding: 32 } }}>
+      <Card style={{ width: '100%', maxWidth: 400 }} styles={{ body: { padding: 'clamp(20px, 6vw, 32px)' } }}>
         <Typography.Title level={3} style={{ textAlign: 'center', marginBottom: 4 }}>
           批量推理平台
         </Typography.Title>

@@ -29,6 +29,7 @@ type RuleForm = {
   off_payload?: string
   effort_options?: string[]
   default_effort?: string
+  model_type?: '' | 'chat' | 'embedding'
   preset?: string
   billing_override?: boolean
   inference_base_url?: string
@@ -204,6 +205,7 @@ export default function AdminSystemPage() {
             off_payload: parseJson(r.off_payload),
             effort_options: r.effort_options ?? [],
             default_effort: r.default_effort ?? '',
+            model_type: r.model_type ?? '',
             // 规则 id 用来在后端找回已存的 API Key；Key 只在填了新值时提交
             id: r.id ?? null,
             billing_override: !!r.billing_override,
@@ -387,7 +389,7 @@ export default function AdminSystemPage() {
           description="任务无法入队或执行，请检查 REDIS_URL 配置与 Redis 服务状态。" />
       )}
 
-      <Row gutter={16}>
+      <Row gutter={[16, 16]}>
         <Col xs={12} md={6}>
           <Card><Statistic title="排队中" value={dash?.queue.queued ?? 0} /></Card>
         </Col>
@@ -412,7 +414,7 @@ export default function AdminSystemPage() {
         </Col>
       </Row>
 
-      <Row gutter={16}>
+      <Row gutter={[16, 16]}>
         <Col xs={24} lg={14}>
           <Card title="Worker 状态"
             extra={
@@ -652,6 +654,8 @@ export default function AdminSystemPage() {
                           {rules?.[name]?.enabled === false ? '不支持推理' : '支持推理'}
                         </Tag>
                         {rules?.[name]?.billing_override && <Tag color="blue">模型独立计费</Tag>}
+                        {rules?.[name]?.model_type === 'embedding' && <Tag color="purple">Embedding</Tag>}
+                        {rules?.[name]?.model_type === 'chat' && <Tag color="cyan">Chat</Tag>}
                         {!!rules?.[name]?.effort_options?.length && (
                           <Typography.Text type="secondary">
                             档位：{rules[name].effort_options?.join(' / ')}
@@ -672,6 +676,14 @@ export default function AdminSystemPage() {
                           <Form.Item {...rest} name={[name, 'pattern']} label="模型名"
                             rules={[{ required: true, message: '填模型名或通配符' }]}>
                             <Input className="mono" placeholder="qwen3-*" style={{ width: 200 }} />
+                          </Form.Item>
+                          <Form.Item {...rest} name={[name, 'model_type']} label="模型类型"
+                            extra="决定任务页显示哪套参数，优先于按模型名判断">
+                            <Select style={{ width: 200 }} options={[
+                              { value: '', label: '自动（名称含 embed）' },
+                              { value: 'chat', label: 'Chat' },
+                              { value: 'embedding', label: 'Embedding' },
+                            ]} />
                           </Form.Item>
                           <Form.Item {...rest} name={[name, 'enabled']} label="支持推理"
                             valuePropName="checked"
@@ -743,7 +755,7 @@ export default function AdminSystemPage() {
                 <Button type="dashed"
                   onClick={() => {
                     setOpenRules((prev) => [...prev, fields.length])
-                    add({ enabled: true, payload: '{}', off_payload: '{}' })
+                    add({ enabled: true, payload: '{}', off_payload: '{}', model_type: '' })
                   }}
                   style={{ marginBottom: 16 }}>
                   + 添加模型配置
@@ -937,25 +949,25 @@ export default function AdminSystemPage() {
           </Space>
 
           <Row gutter={16}>
-            <Col span={14}>
+            <Col xs={24} sm={14}>
               <Form.Item name="smtp_host" label="SMTP 服务器">
                 <Input className="mono" placeholder="smtp.example.com" />
               </Form.Item>
             </Col>
-            <Col span={10}>
+            <Col xs={24} sm={10}>
               <Form.Item name="smtp_port" label="端口">
                 <InputNumber min={1} max={65535} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
           </Row>
           <Row gutter={16}>
-            <Col span={12}>
+            <Col xs={24} sm={12}>
               <Form.Item name="smtp_username" label="用户名"
                 extra="留空表示服务器不需要认证">
                 <Input className="mono" />
               </Form.Item>
             </Col>
-            <Col span={12}>
+            <Col xs={24} sm={12}>
               <Form.Item name="smtp_password" label="密码 / 授权码"
                 extra={settings?.smtp_password_masked
                   ? `当前：${settings.smtp_password_masked}，留空表示不修改`
@@ -965,12 +977,12 @@ export default function AdminSystemPage() {
             </Col>
           </Row>
           <Row gutter={16}>
-            <Col span={12}>
+            <Col xs={24} sm={12}>
               <Form.Item name="smtp_from" label="发件人地址">
                 <Input className="mono" placeholder="noreply@example.com" />
               </Form.Item>
             </Col>
-            <Col span={12}>
+            <Col xs={24} sm={12}>
               <Form.Item name="smtp_from_name" label="发件人显示名">
                 <Input placeholder="批量推理平台" />
               </Form.Item>

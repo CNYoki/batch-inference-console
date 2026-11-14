@@ -286,7 +286,7 @@ export default function JobsPage() {
         </Space>
       }
     >
-      <Flex gap={12} wrap style={{ marginBottom: 16 }}>
+      <Flex gap={12} wrap className="filter-bar" style={{ marginBottom: 16 }}>
         <Input.Search
           allowClear placeholder="搜索任务名称" style={{ width: 240 }}
           defaultValue={keyword}

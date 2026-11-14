@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Alert, App, Checkbox, Divider, Form, Modal, Select, Space, Typography } from 'antd'
+import { Alert, App, Checkbox, Divider, Form, InputNumber, Modal, Select, Space, Typography } from 'antd'
 import { api } from '../api'
 import type { Job, ModelOptions, SystemSettings } from '../api'
 import { useAuth } from '../hooks/useAuth'
@@ -66,10 +66,14 @@ export default function ChangeModelModal(
     const picked = parseSelection(value)
     if (!picked) return
     let params: Record<string, unknown>
+    let concurrency: number
     try {
       await form.validateFields()
       // getFieldsValue(true) 连被隐藏的项一起取；表单里没有的参数（命令行设的 stop 等）保留原值
-      params = { ...job.params, ...formToParams(form.getFieldsValue(true)) }
+      const values = form.getFieldsValue(true)
+      const { concurrency: c, ...paramValues } = values
+      concurrency = c ?? 0
+      params = { ...job.params, ...formToParams(paramValues, caps?.model_type) }
     } catch (err) {
       if (err instanceof SyntaxError) message.error('「附加请求参数」不是合法 JSON')
       return
@@ -83,6 +87,7 @@ export default function ChangeModelModal(
         model_config_id: picked.source === 'shared' ? picked.key : null,
         personal_model: picked.source === 'personal' ? picked.key : null,
         params,
+        concurrency,
       })
       changed = true
       if (resume) await api.resumeJob(job.id)
@@ -156,10 +161,19 @@ export default function ChangeModelModal(
       <Form
         form={form}
         layout="vertical"
-        initialValues={paramsToForm(job.params)}
+        initialValues={{ ...paramsToForm(job.params), concurrency: job.concurrency }}
         onValuesChange={() => setDirty(true)}
       >
-        <JobParamsFields form={form} caps={caps} />
+        <JobParamsFields
+          form={form}
+          caps={caps}
+          rowExtra={
+            <Form.Item name="concurrency" label="并发数"
+              extra={`0 表示按模型配置${caps?.max_concurrency ? `，上限 ${caps.max_concurrency}` : ''}`}>
+              <InputNumber min={0} max={caps?.max_concurrency || 512} style={{ width: '100%' }} />
+            </Form.Item>
+          }
+        />
       </Form>
 
       <Checkbox style={{ marginTop: 16 }} checked={resume} onChange={(e) => setResume(e.target.checked)}>

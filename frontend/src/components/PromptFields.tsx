@@ -46,7 +46,7 @@ export default function PromptFields({ templateRows = 5 }: { templateRows?: numb
         {(fields, { add, remove }) => (
           <>
             {fields.map((field) => (
-              <Space key={field.key} align="baseline" style={{ display: 'flex', marginBottom: 8 }}>
+              <Space key={field.key} align="baseline" wrap style={{ display: 'flex', marginBottom: 8 }}>
                 <Form.Item {...field} name={[field.name, 'name']} style={{ marginBottom: 0 }}
                   rules={[{ required: true, message: '变量名' },
                           { pattern: /^[A-Za-z_][A-Za-z0-9_]*$/, message: '字母/数字/下划线，不能数字开头' }]}>

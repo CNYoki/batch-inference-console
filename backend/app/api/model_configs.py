@@ -29,6 +29,7 @@ from ..services.gateway import (
     billing_applies,
     billing_mode,
     list_user_models,
+    match_rule,
     resolve_reasoning,
 )
 from ..services.inference import InferenceClient, InferenceError
@@ -42,10 +43,12 @@ def _personal_reasoning(models: list[str], runtime: dict) -> dict[str, PersonalR
     out: dict[str, PersonalReasoningCap] = {}
     for name in models:
         cfg = resolve_reasoning(name, runtime)
+        rule = match_rule(name, runtime) or {}
         out[name] = PersonalReasoningCap(
             reasoning_mode="optional" if cfg["enabled"] else "off",
             effort_options=cfg["effort_options"],
             default_effort=cfg["default_effort"],
+            model_type=rule.get("model_type") or "",
         )
     return out
 

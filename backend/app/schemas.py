@@ -214,6 +214,8 @@ class GatewayReasoningRule(BaseModel):
     off_payload: dict[str, Any] = Field(default_factory=dict)
     effort_options: list[str] = Field(default_factory=list, max_length=16)
     default_effort: str = Field(default="", max_length=32)
+    # 决定任务页显示哪套参数，优先于按模型名判断；留空 = 模型名含 embed 算 embedding，否则 chat
+    model_type: Literal["", "chat", "embedding"] = ""
 
     # ---- 模型独立计费：只在全局独立计费开启时生效 ----
     # 规则的稳定标识，保存时靠它找回这条规则已存的 API Key；新规则由后端生成
@@ -264,6 +266,8 @@ class PersonalReasoningCap(BaseModel):
     reasoning_mode: Literal["off", "optional"] = "optional"
     effort_options: list[str] = Field(default_factory=list)
     default_effort: str = ""
+    # 分模型配置里指定的类型；空串表示没指定，由前端按模型名判断
+    model_type: Literal["", "chat", "embedding"] = ""
 
 
 class ModelOption(BaseModel):
@@ -464,6 +468,8 @@ class JobModelChange(ModelSelection):
     """
 
     params: JobParams | None = None
+    # 不传沿用原并发；0 表示按模型配置。超过（新）模型上限的会被截到上限
+    concurrency: int | None = Field(default=None, ge=0, le=512)
 
 
 class JobCreate(JobSubmission):

@@ -1029,8 +1029,10 @@ async def change_model(job_id: str, payload: JobModelChange, user: CurrentUser, 
     if payload.params is not None:
         job.params = payload.params.model_dump(exclude_none=True)
     job.resolved_params = _resolve_job_params(mc, JobParams.model_validate(job.params or {}))
+    if payload.concurrency is not None:
+        job.concurrency = payload.concurrency
     if job.concurrency:
-        # 原来的并发是按旧模型上限截过的，换了模型要按新上限再截一次
+        # 新填的并发，或按旧模型上限截过的原并发，都按（新）模型上限再截一次
         job.concurrency = min(job.concurrency, mc.max_concurrency)
     await db.commit()
 

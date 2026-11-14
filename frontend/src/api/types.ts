@@ -105,10 +105,14 @@ export interface PersonalKeyInfo {
 }
 
 /** 个人模型的推理能力，由后端按网关规则算好 */
+export type ModelType = 'chat' | 'embedding'
+
 export interface PersonalReasoningCap {
   reasoning_mode: 'off' | 'optional'
   effort_options: string[]
   default_effort: string
+  /** 分模型配置里指定的类型；空串表示按模型名判断 */
+  model_type?: ModelType | ''
 }
 
 /** 个人网关里按模型名生效的推理配置；pattern 支持 * 通配 */
@@ -120,6 +124,8 @@ export interface GatewayReasoningRule {
   off_payload: Record<string, unknown>
   effort_options: string[]
   default_effort: string
+  /** 决定任务页显示哪套参数，优先于按模型名判断；空串表示按模型名判断 */
+  model_type?: ModelType | ''
   /** 模型独立计费：只在全局独立计费开启时生效 */
   id?: string | null
   billing_override?: boolean

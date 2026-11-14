@@ -400,7 +400,7 @@ async def test_personal_reasoning_caps_follow_model_name_rules(
     )).json()
     caps = resp["reasoning"]
     assert caps["qwen3-32b"] == {
-        "reasoning_mode": "optional", "effort_options": [], "default_effort": "",
+        "reasoning_mode": "optional", "effort_options": [], "default_effort": "", "model_type": "",
     }
     assert caps["gpt-oss-120b"]["effort_options"] == ["low", "medium", "high"]
     assert caps["gpt-oss-120b"]["default_effort"] == "medium"
@@ -412,6 +412,34 @@ async def test_personal_reasoning_caps_follow_model_name_rules(
     assert options["personal_reasoning"]["gpt-oss-120b"]["default_effort"] == "medium"
 
     # 收尾：规则是全站配置，别影响后面的用例
+    await admin_client.patch("/api/admin/settings", json={"user_gateway_reasoning_rules": []})
+
+
+@pytest.mark.asyncio
+async def test_personal_model_type_comes_from_first_matching_rule(admin_client: AsyncClient, monkeypatch):
+    """分模型配置指定的类型下发给前端；没指定时留空，由前端按模型名判断。"""
+    await _enable_gateway(admin_client)
+    _fake_gateway(monkeypatch, models=("vec-1", "embed-chat", "bge-embed", "plain"))
+    resp = await admin_client.patch("/api/admin/settings", json={
+        "user_gateway_reasoning_rules": [
+            {"pattern": "vec-*", "model_type": "embedding"},
+            {"pattern": "embed-*", "model_type": "chat"},
+            {"pattern": "bge-*"},
+        ],
+    })
+    assert [r["model_type"] for r in resp.json()["user_gateway_reasoning_rules"]] == ["embedding", "chat", ""]
+
+    caps = (await admin_client.post(
+        "/api/models/personal", json={"token": "sk-token", "remember": True}
+    )).json()["reasoning"]
+    assert {name: cap["model_type"] for name, cap in caps.items()} == {
+        "vec-1": "embedding", "embed-chat": "chat", "bge-embed": "", "plain": "",
+    }
+
+    bad = await admin_client.patch("/api/admin/settings", json={
+        "user_gateway_reasoning_rules": [{"pattern": "x", "model_type": "image"}],
+    })
+    assert bad.status_code == 422
     await admin_client.patch("/api/admin/settings", json={"user_gateway_reasoning_rules": []})
 
 
@@ -1097,6 +1125,16 @@ async def test_change_params_on_stopped_job(admin_client: AsyncClient, monkeypat
     # 不传 params：沿用刚才那份
     out = (await admin_client.post(url, json={"model_config_id": model["id"]})).json()
     assert out["params"]["system_prompt"] == "新提示"
+
+    # 改并发：超过模型上限的截到上限；不传就沿用；0 表示按模型配置
+    out = (await admin_client.post(url, json={"model_config_id": model["id"], "concurrency": 3})).json()
+    assert out["concurrency"] == 3
+    out = (await admin_client.post(url, json={"model_config_id": model["id"]})).json()
+    assert out["concurrency"] == 3
+    out = (await admin_client.post(url, json={"model_config_id": model["id"], "concurrency": 512})).json()
+    assert out["concurrency"] == model["max_concurrency"]
+    out = (await admin_client.post(url, json={"model_config_id": model["id"], "concurrency": 0})).json()
+    assert out["concurrency"] == 0
 
     # 管理员改别人个人模型任务的参数：模型没动就放行，换模型仍然不行
     await _enable_gateway(admin_client)

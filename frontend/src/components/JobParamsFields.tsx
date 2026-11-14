@@ -1,7 +1,8 @@
 import { useEffect, useMemo } from 'react'
 import type { ReactNode } from 'react'
-import { Col, Collapse, Form, Input, InputNumber, Row, Slider, Space, Switch, Tag } from 'antd'
+import { Alert, Col, Collapse, Form, Input, InputNumber, Row, Select, Slider, Space, Switch, Tag } from 'antd'
 import type { FormInstance } from 'antd'
+import type { ModelType } from '../api'
 import type { ModelCaps } from '../modelSelect'
 import { defaultEffort, sortEfforts } from '../reasoning'
 import { formatNumber } from '../utils'
@@ -30,8 +31,13 @@ function EffortSlider(
 
 /** 任务上存的推理参数 → 表单值；附加参数在表单里是 JSON 文本 */
 export function paramsToForm(params: Record<string, unknown>) {
-  const extra = params.extra as Record<string, unknown> | undefined
+  // dimensions / encoding_format 只属于 embedding，不留在 chat 的附加参数里，
+  // 否则 embedding 任务换成 chat 模型时会被发出去；user 两边都能用
+  const { dimensions, encoding_format, ...extra } = (params.extra ?? {}) as Record<string, unknown>
   return {
+    dimensions: dimensions ?? undefined,
+    encoding_format: encoding_format ?? undefined,
+    user: extra.user ?? undefined,
     system_prompt: params.system_prompt ?? undefined,
     temperature: params.temperature ?? undefined,
     top_p: params.top_p ?? undefined,
@@ -40,12 +46,25 @@ export function paramsToForm(params: Record<string, unknown>) {
     json_mode: !!params.json_mode,
     reasoning: !!params.reasoning,
     reasoning_effort: params.reasoning_effort ?? undefined,
-    extra: extra && Object.keys(extra).length ? JSON.stringify(extra, null, 2) : undefined,
+    extra: Object.keys(extra).length ? JSON.stringify(extra, null, 2) : undefined,
   }
 }
 
 /** 表单值 → 提交给后端的推理参数。附加参数不是合法 JSON 时抛 SyntaxError */
-export function formToParams(values: Record<string, unknown>): Record<string, unknown> {
+export function formToParams(
+  values: Record<string, unknown>, modelType: ModelType = 'chat',
+): Record<string, unknown> {
+  if (modelType === 'embedding') {
+    return {
+      system_prompt: null, temperature: null, top_p: null, max_tokens: null, seed: null,
+      json_mode: false, reasoning: false, reasoning_effort: null,
+      extra: Object.fromEntries(
+        ['dimensions', 'encoding_format', 'user']
+          .filter((k) => values[k] !== undefined && values[k] !== null && values[k] !== '')
+          .map((k) => [k, values[k]]),
+      ),
+    }
+  }
   const extra = typeof values.extra === 'string' ? values.extra.trim() : ''
   return {
     system_prompt: values.system_prompt || null,
@@ -89,6 +108,37 @@ export default function JobParamsFields(
     if (next !== current) form.setFieldValue('reasoning_effort', next)
   }, [form, effortOptions, effortFallback])
 
+  if (caps?.model_type === 'embedding') {
+    return (
+      <>
+        <Alert type="info" showIcon style={{ marginBottom: 16 }}
+          message="Embedding 模型：数据每行需要 input 字段，对话参数不适用。" />
+        <Row gutter={16}>
+          <Col xs={24} sm={12}>
+            <Form.Item name="dimensions" label="dimensions" extra="向量维度，留空用模型默认值">
+              <InputNumber min={1} precision={0} style={{ width: '100%' }} placeholder="可选" />
+            </Form.Item>
+          </Col>
+          <Col xs={24} sm={12}>
+            <Form.Item name="encoding_format" label="encoding_format">
+              <Select allowClear placeholder="float（默认）"
+                options={[{ value: 'float', label: 'float' }, { value: 'base64', label: 'base64' }]} />
+            </Form.Item>
+          </Col>
+          <Col xs={24} sm={12}>
+            <Form.Item name="user" label="user" extra="终端用户标识，可选">
+              <Input maxLength={256} placeholder="可选" />
+            </Form.Item>
+          </Col>
+          {rowExtra && <Col xs={24} sm={12}>{rowExtra}</Col>}
+        </Row>
+        {advanced && (
+          <Collapse size="small" items={[{ key: 'adv', label: '高级选项', children: advanced }]} />
+        )}
+      </>
+    )
+  }
+
   return (
     <>
       {caps?.supports_system_prompt !== false && (
@@ -101,13 +151,13 @@ export default function JobParamsFields(
 
       <Row gutter={16}>
         {caps?.supports_temperature !== false && (
-          <Col span={12}>
+          <Col xs={24} sm={12}>
             <Form.Item name="temperature" label="temperature">
               <Slider min={0} max={2} step={0.1} marks={{ 0: '0', 1: '1', 2: '2' }} />
             </Form.Item>
           </Col>
         )}
-        <Col span={12}>
+        <Col xs={24} sm={12}>
           <Form.Item name="max_tokens" label="max_tokens"
             extra={caps?.max_tokens_cap ? `上限 ${formatNumber(caps.max_tokens_cap)}` : undefined}>
             <InputNumber min={1} max={caps?.max_tokens_cap || 200000}
@@ -117,17 +167,17 @@ export default function JobParamsFields(
       </Row>
 
       <Row gutter={16}>
-        <Col span={8}>
+        <Col xs={12} sm={8}>
           <Form.Item name="top_p" label="top_p">
             <InputNumber min={0} max={1} step={0.05} style={{ width: '100%' }} placeholder="可选" />
           </Form.Item>
         </Col>
-        <Col span={8}>
+        <Col xs={12} sm={8}>
           <Form.Item name="seed" label="seed">
             <InputNumber style={{ width: '100%' }} placeholder="可选" />
           </Form.Item>
         </Col>
-        {rowExtra && <Col span={8}>{rowExtra}</Col>}
+        {rowExtra && <Col xs={12} sm={8}>{rowExtra}</Col>}
       </Row>
 
       <Space size={24} wrap style={{ marginBottom: 16 }}>

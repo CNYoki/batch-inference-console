@@ -174,7 +174,7 @@ export default function ScriptGeneratorPage() {
   const customIdMode = Form.useWatch('custom_id_mode', form) as string | undefined
 
   return (
-    <Row gutter={16}>
+    <Row gutter={[16, 16]}>
       <Col xs={24} xl={13}>
         <Card title="生成数据切分脚本">
           <Form
@@ -184,14 +184,14 @@ export default function ScriptGeneratorPage() {
           >
             <Divider orientation="left" plain>输入</Divider>
             <Row gutter={16}>
-              <Col span={16}>
+              <Col xs={24} sm={16}>
                 <Form.Item name="source_path" label="文件或目录路径（你本地的路径）"
                   rules={[{ required: true, message: '请填写路径' }]}
                   extra="填目录会处理里面所有匹配格式的文件">
                   <Input className="mono" placeholder="/data/raw 或 /data/raw/input.csv" />
                 </Form.Item>
               </Col>
-              <Col span={8}>
+              <Col xs={24} sm={8}>
                 <Form.Item name="source_format" label="文件格式">
                   <Select options={[
                     { value: 'csv', label: 'CSV' },
@@ -264,13 +264,13 @@ export default function ScriptGeneratorPage() {
               children: (
                 <>
                   <Row gutter={16}>
-                    <Col span={12}>
+                    <Col xs={24} sm={12}>
                       <Form.Item name="endpoint_path" label="请求端点"
                         extra="写进每行的 url 字段，与 OpenAI Batch 格式一致">
                         <Input className="mono" />
                       </Form.Item>
                     </Col>
-                    <Col span={12}>
+                    <Col xs={24} sm={12}>
                       <Form.Item name="model" label="model 字段（可选）"
                         extra="留空则由平台的模型配置决定，一般不用填">
                         <Input className="mono" placeholder="留空即可" />
@@ -278,12 +278,12 @@ export default function ScriptGeneratorPage() {
                     </Col>
                   </Row>
                   <Row gutter={16}>
-                    <Col span={12}>
+                    <Col xs={24} sm={12}>
                       <Form.Item name="output_dir" label="输出目录">
                         <Input className="mono" />
                       </Form.Item>
                     </Col>
-                    <Col span={12}>
+                    <Col xs={24} sm={12}>
                       <Form.Item name="output_prefix" label="输出文件名前缀">
                         <Input className="mono" />
                       </Form.Item>

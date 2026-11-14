@@ -179,7 +179,7 @@ export default function NewJobPage() {
 
     let params: Record<string, unknown>
     try {
-      params = formToParams(values)
+      params = formToParams(values, caps?.model_type)
     } catch {
       message.error('「附加参数」不是合法 JSON')
       return
@@ -234,7 +234,7 @@ export default function NewJobPage() {
         <Steps current={step} items={[{ title: '上传数据' }, { title: '选择模型' }, { title: '配置并提交' }]} />
       </Card>
 
-      <Row gutter={16}>
+      <Row gutter={[16, 16]}>
         <Col xs={24} lg={10}>
           <Card title="1. 上传 JSONL 文件">
             <Upload.Dragger
@@ -521,7 +521,7 @@ export default function NewJobPage() {
                 : '试跑没通过，任务还没有提交'}
               description={dry.error} />
             {dry.result && (
-              <Descriptions size="small" column={2} bordered>
+              <Descriptions size="small" column={{ xs: 1, sm: 2 }} bordered>
                 <Descriptions.Item label="试的是哪条">
                   {dry.result.custom_id || `第 ${dry.result.item_index + 1} 条`}
                 </Descriptions.Item>

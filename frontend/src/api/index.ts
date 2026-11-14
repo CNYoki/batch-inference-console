@@ -113,6 +113,7 @@ export const api = {
     model_config_id?: string | null
     personal_model?: string | null
     params?: Record<string, unknown>
+    concurrency?: number
   }) => http.post<Job>(`/jobs/${id}/model`, payload).then((r) => r.data),
   retryFailed: (id: string) => http.post<Job>(`/jobs/${id}/retry-failed`).then((r) => r.data),
   // 管理员一键暂停全站排队中与运行中的任务

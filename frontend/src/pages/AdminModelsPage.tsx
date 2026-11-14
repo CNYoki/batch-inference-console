@@ -242,14 +242,14 @@ export default function AdminModelsPage() {
       >
         <Form form={form} layout="vertical">
           <Row gutter={16}>
-            <Col span={12}>
+            <Col xs={24} sm={12}>
               <Form.Item name="name" label="唯一标识"
                 rules={[{ required: true, message: '请填写唯一标识' }]}
                 extra="创建后不可修改，用于内部识别">
                 <Input placeholder="qwen3-32b" disabled={!!editing} className="mono" />
               </Form.Item>
             </Col>
-            <Col span={12}>
+            <Col xs={24} sm={12}>
               <Form.Item name="display_name" label="展示名称"
                 rules={[{ required: true, message: '请填写展示名称' }]}>
                 <Input placeholder="Qwen3 32B（内网）" />
@@ -259,26 +259,26 @@ export default function AdminModelsPage() {
           <Form.Item name="description" label="描述"><Input placeholder="可留空" /></Form.Item>
 
           <Row gutter={16}>
-            <Col span={14}>
+            <Col xs={24} sm={14}>
               <Form.Item name="base_url" label="base_url"
                 rules={[{ required: true, message: '请填写 base_url' }]}>
                 <Input placeholder="http://127.0.0.1:8000/v1" className="mono" />
               </Form.Item>
             </Col>
-            <Col span={10}>
+            <Col xs={24} sm={10}>
               <Form.Item name="endpoint_path" label="端点路径">
                 <Input className="mono" />
               </Form.Item>
             </Col>
           </Row>
           <Row gutter={16}>
-            <Col span={12}>
+            <Col xs={24} sm={12}>
               <Form.Item name="model_name" label="model 参数"
                 rules={[{ required: true, message: '请填写下发给端点的 model 名' }]}>
                 <Input placeholder="qwen3-32b" className="mono" />
               </Form.Item>
             </Col>
-            <Col span={12}>
+            <Col xs={24} sm={12}>
               <Form.Item name="api_key" label="API Key"
                 extra={editing ? '留空表示不修改；填 - 一个空格再保存可清除' : undefined}>
                 <Input.Password placeholder={editing ? '不修改请留空' : 'sk-…'} className="mono" />
@@ -287,15 +287,15 @@ export default function AdminModelsPage() {
           </Row>
 
           <Row gutter={16}>
-            <Col span={6}><Form.Item name="enabled" label="启用" valuePropName="checked"><Switch /></Form.Item></Col>
-            <Col span={6}><Form.Item name="admin_only" label="仅管理员" valuePropName="checked"><Switch /></Form.Item></Col>
-            <Col span={6}><Form.Item name="supports_system_prompt" label="系统提示词" valuePropName="checked"><Switch /></Form.Item></Col>
-            <Col span={6}><Form.Item name="supports_temperature" label="temperature" valuePropName="checked"><Switch /></Form.Item></Col>
+            <Col xs={12} sm={6}><Form.Item name="enabled" label="启用" valuePropName="checked"><Switch /></Form.Item></Col>
+            <Col xs={12} sm={6}><Form.Item name="admin_only" label="仅管理员" valuePropName="checked"><Switch /></Form.Item></Col>
+            <Col xs={12} sm={6}><Form.Item name="supports_system_prompt" label="系统提示词" valuePropName="checked"><Switch /></Form.Item></Col>
+            <Col xs={12} sm={6}><Form.Item name="supports_temperature" label="temperature" valuePropName="checked"><Switch /></Form.Item></Col>
           </Row>
           <Row gutter={16}>
-            <Col span={6}><Form.Item name="supports_json_mode" label="JSON 模式" valuePropName="checked"><Switch /></Form.Item></Col>
-            <Col span={6}><Form.Item name="supports_tools" label="工具调用" valuePropName="checked"><Switch /></Form.Item></Col>
-            <Col span={12}>
+            <Col xs={12} sm={6}><Form.Item name="supports_json_mode" label="JSON 模式" valuePropName="checked"><Switch /></Form.Item></Col>
+            <Col xs={12} sm={6}><Form.Item name="supports_tools" label="工具调用" valuePropName="checked"><Switch /></Form.Item></Col>
+            <Col xs={24} sm={12}>
               <Form.Item name="reasoning_mode" label="深度推理开关">
                 <Select options={[
                   { value: 'off', label: '不支持' },
@@ -307,15 +307,15 @@ export default function AdminModelsPage() {
           </Row>
 
           <Row gutter={16}>
-            <Col span={6}><Form.Item name="max_concurrency" label="最大并发"><InputNumber min={1} max={512} style={{ width: '100%' }} /></Form.Item></Col>
-            <Col span={6}><Form.Item name="rpm_limit" label="RPM 限制"><InputNumber min={0} style={{ width: '100%' }} /></Form.Item></Col>
-            <Col span={6}><Form.Item name="tpm_limit" label="TPM 限制"><InputNumber min={0} style={{ width: '100%' }} /></Form.Item></Col>
-            <Col span={6}><Form.Item name="max_tokens_cap" label="max_tokens 上限"><InputNumber min={0} style={{ width: '100%' }} /></Form.Item></Col>
+            <Col xs={12} sm={6}><Form.Item name="max_concurrency" label="最大并发"><InputNumber min={1} max={512} style={{ width: '100%' }} /></Form.Item></Col>
+            <Col xs={12} sm={6}><Form.Item name="rpm_limit" label="RPM 限制"><InputNumber min={0} style={{ width: '100%' }} /></Form.Item></Col>
+            <Col xs={12} sm={6}><Form.Item name="tpm_limit" label="TPM 限制"><InputNumber min={0} style={{ width: '100%' }} /></Form.Item></Col>
+            <Col xs={12} sm={6}><Form.Item name="max_tokens_cap" label="max_tokens 上限"><InputNumber min={0} style={{ width: '100%' }} /></Form.Item></Col>
           </Row>
           <Row gutter={16}>
-            <Col span={8}><Form.Item name="request_timeout" label="单请求超时(秒)"><InputNumber min={5} max={3600} style={{ width: '100%' }} /></Form.Item></Col>
-            <Col span={8}><Form.Item name="max_retries" label="失败重试次数"><InputNumber min={0} max={10} style={{ width: '100%' }} /></Form.Item></Col>
-            <Col span={8}><Form.Item name="sort_order" label="排序权重"><InputNumber style={{ width: '100%' }} /></Form.Item></Col>
+            <Col xs={24} sm={8}><Form.Item name="request_timeout" label="单请求超时(秒)"><InputNumber min={5} max={3600} style={{ width: '100%' }} /></Form.Item></Col>
+            <Col xs={24} sm={8}><Form.Item name="max_retries" label="失败重试次数"><InputNumber min={0} max={10} style={{ width: '100%' }} /></Form.Item></Col>
+            <Col xs={24} sm={8}><Form.Item name="sort_order" label="排序权重"><InputNumber style={{ width: '100%' }} /></Form.Item></Col>
           </Row>
 
           <Collapse size="small" items={[{
@@ -348,14 +348,14 @@ export default function AdminModelsPage() {
                   <Input.TextArea rows={3} className="mono" />
                 </Form.Item>
                 <Row gutter={16}>
-                  <Col span={16}>
+                  <Col xs={24} sm={16}>
                     <Form.Item name="reasoning_effort_options" label="用户可选的推理档位"
                       extra="留空则不让用户选，请求体原样发出。列表里没有的档位可以直接输入">
                       <Select mode="tags" options={EFFORT_LEVEL_OPTIONS}
                         placeholder="low, medium, high" />
                     </Form.Item>
                   </Col>
-                  <Col span={8}>
+                  <Col xs={24} sm={8}>
                     <Form.Item name="reasoning_default_effort" label="默认档位"
                       extra="留空则用名单第一项">
                       <Select allowClear placeholder="不指定"

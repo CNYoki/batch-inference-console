@@ -1,5 +1,5 @@
 import { Space, Tag } from 'antd'
-import type { ModelOption, ModelOptions, PersonalReasoningCap, SystemSettings } from './api'
+import type { ModelOption, ModelOptions, ModelType, PersonalReasoningCap, SystemSettings } from './api'
 
 /** 参数表单要看的模型能力：决定哪些参数显示、推理档位有哪些 */
 export type ModelCaps = Pick<
@@ -7,13 +7,20 @@ export type ModelCaps = Pick<
   | 'supports_temperature' | 'supports_system_prompt' | 'supports_json_mode'
   | 'reasoning_mode' | 'reasoning_effort_options' | 'reasoning_default_effort'
   | 'max_concurrency' | 'max_tokens_cap'
->
+> & { model_type?: ModelType }
+
+/** 明确配置的类型优先；没配置时模型名含 embed 的算 embedding，其余都是 chat */
+export function resolveModelType(name: string, configured?: ModelType | ''): ModelType {
+  return configured || (name.toLowerCase().includes('embed') ? 'embedding' : 'chat')
+}
 
 /**
  * 个人模型拿不到能力声明，采样参数按最宽松处理，由网关自己拒绝不支持的；
  * 推理部分则用后端按模型名规则算好的 cap，拿不到才退回网关默认配置。
  */
-export function personalCaps(settings: SystemSettings | null, cap?: PersonalReasoningCap): ModelCaps {
+export function personalCaps(
+  settings: SystemSettings | null, cap: PersonalReasoningCap | undefined, modelName: string,
+): ModelCaps {
   const fallbackMode = (settings?.user_gateway_reasoning_enabled ?? true) ? 'optional' : 'off'
   return {
     supports_temperature: true,
@@ -27,6 +34,7 @@ export function personalCaps(settings: SystemSettings | null, cap?: PersonalReas
       cap?.default_effort ?? settings?.user_gateway_reasoning_default_effort ?? '',
     max_concurrency: settings?.user_gateway_max_concurrency ?? 0,
     max_tokens_cap: settings?.user_gateway_max_tokens_cap ?? 0,
+    model_type: resolveModelType(modelName, cap?.model_type),
   }
 }
 
@@ -36,9 +44,10 @@ export function capsFor(
 ): ModelCaps | undefined {
   if (!selection) return undefined
   if (selection.source === 'personal') {
-    return personalCaps(settings, options?.personal_reasoning?.[selection.key])
+    return personalCaps(settings, options?.personal_reasoning?.[selection.key], selection.key)
   }
-  return options?.shared.find((m) => m.id === selection.key)
+  const shared = options?.shared.find((m) => m.id === selection.key)
+  return shared && { ...shared, model_type: resolveModelType(`${shared.name} ${shared.display_name}`) }
 }
 
 /** 下拉框的值把来源编进去：shared:<配置id> / personal:<模型名> */

@@ -77,7 +77,7 @@ export default function AdminBillingPage() {
       <Card
         title="计费记录"
         extra={
-          <Space wrap>
+          <Space wrap className="filter-bar">
             <Select
               allowClear placeholder="全部状态" style={{ width: 130 }} value={status}
               onChange={(v) => { setStatus(v); setPage(1) }}
