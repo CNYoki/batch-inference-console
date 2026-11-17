@@ -5,7 +5,7 @@
 - 直连（默认）：用户在「新建任务」里填自己的网关 token，后端拿它去 `{base_url}/models`
   拉取该 token 有权限的模型 —— 权限由网关判定，平台不做二次授权。
   执行任务时同样以该 token 调用网关，用量算在用户自己头上。
-- 独立计费：推理和计费分开。推理走管理员配置的推理接口和平台自己的 Key；
+- 合并计费：推理和计费分开。推理走管理员配置的推理接口和平台自己的 Key；
   用户填的是网关里 batch 分组的 Key，调不了 /v1，只用来标识向谁扣费，
   由 worker 按用量调计费接口扣费（见 services.billing）。
 """
@@ -62,7 +62,7 @@ def _extract_error(resp: httpx.Response) -> str:
 async def fetch_models(base_url: str, token: str, *, platform: bool = False) -> list[str]:
     """拉取 token 有权限的模型 id 列表。
 
-    platform=True 表示用的是平台自己的推理 Key（独立计费模式），
+    platform=True 表示用的是平台自己的推理 Key（合并计费模式），
     出错时提示找管理员，而不是让用户去换 token。
     """
     url = base_url.rstrip("/") + "/models"
@@ -100,7 +100,7 @@ async def fetch_models(base_url: str, token: str, *, platform: bool = False) -> 
 
 
 # --------------------------------------------------------------------------- #
-# 独立计费模式
+# 合并计费模式
 # --------------------------------------------------------------------------- #
 BILLING_PATH = "/api/batch/billing"
 BATCH_GROUP = "batch"
@@ -117,7 +117,7 @@ _USER_KEY_PLACEHOLDER = "<user-key>"
 
 
 def inference_endpoint(runtime: dict, user_token: str) -> tuple[str, str]:
-    """执行推理用的地址和 Key：独立计费时是平台的推理接口，否则是网关 + 用户 token。
+    """执行推理用的地址和 Key：合并计费时是平台的推理接口，否则是网关 + 用户 token。
 
     推理接口的 Key 可以设成透传用户 Key —— 推理接口本身就认用户的 Key 时用。
     """
@@ -158,8 +158,8 @@ def billing_endpoint_error(runtime: dict) -> str | None:
 def billing_applies(model_name: str, runtime: dict) -> bool:
     """这个模型要不要走计费接口。
 
-    独立计费开着时默认所有模型都计费；打开「仅单独配置的模型计费」后，
-    只有命中了打开「模型独立计费」的分模型配置的模型才计费，其余模型照常推理、不调计费接口。
+    合并计费开着时默认所有模型都计费；打开「仅单独配置的模型计费」后，
+    只有命中了打开「模型合并计费」的分模型配置的模型才计费，其余模型照常推理、不调计费接口。
     """
     if not billing_mode(runtime):
         return False
@@ -170,7 +170,7 @@ def billing_applies(model_name: str, runtime: dict) -> bool:
 
 
 def billing_config_error(runtime: dict, model_name: str | None = None) -> str | None:
-    """独立计费模式下配置缺了哪样。返回 None 表示齐了。
+    """合并计费模式下配置缺了哪样。返回 None 表示齐了。
 
     给了模型名时按该模型实际走的推理接口检查（分模型配置可以单独指定推理接口），
     这个模型不计费时也就不要求计费接口。
@@ -206,9 +206,9 @@ def match_rule(model_name: str, runtime: dict) -> dict | None:
 def resolve_route(model_name: str, runtime: dict, user_token: str) -> tuple[str, str, str]:
     """执行推理用的地址、Key 和实际请求的模型名。
 
-    独立计费时，命中的分模型配置打开了「模型独立计费」，就用它的推理接口、Key 和重定向模型名，
+    合并计费时，命中的分模型配置打开了「模型合并计费」，就用它的推理接口、Key 和重定向模型名，
     哪一项留空就退回全局推理接口的那一项（模型名退回用户看到的名字）。
-    全局独立计费没开时分模型的这几项一概不看。
+    全局合并计费没开时分模型的这几项一概不看。
     """
     base, key = inference_endpoint(runtime, user_token)
     upstream = model_name
@@ -318,10 +318,10 @@ async def check_billing_key(runtime: dict, key: str) -> KeyInfo | None:
 
 
 async def list_user_models(runtime: dict, token: str) -> tuple[list[str], KeyInfo | None]:
-    """用户在个人网关下能选的模型，以及（独立计费时）他那个 Key 的额度信息。
+    """用户在个人网关下能选的模型，以及（合并计费时）他那个 Key 的额度信息。
 
     两种模式都用用户自己的 Key 去个人网关地址拉模型 —— 有哪些模型权限仍由网关判定；
-    独立计费时只是执行推理改走平台的推理接口。
+    合并计费时只是执行推理改走平台的推理接口。
     """
     # 推理接口可以按模型单独配，这里只确认计费接口齐了；选定模型后再查推理接口
     if billing_mode(runtime) and (problem := billing_endpoint_error(runtime)):
@@ -416,7 +416,7 @@ def build_personal_config(model_name: str, token: str, runtime: dict) -> ModelCo
     from ..core.security import encrypt_secret
 
     reasoning = resolve_reasoning(model_name, runtime)
-    # 独立计费时推理用平台的 Key（可按模型单独指定接口和重定向模型名），用户的 token 只拿来扣费。
+    # 合并计费时推理用平台的 Key（可按模型单独指定接口和重定向模型名），用户的 token 只拿来扣费。
     # display_name 是用户看到的名字，model_name 是真正发给推理接口的名字
     base_url, api_key, upstream = resolve_route(model_name, runtime, token)
     mc = ModelConfig(

@@ -54,7 +54,7 @@ def _personal_reasoning(models: list[str], runtime: dict) -> dict[str, PersonalR
 
 
 def _personal_billing(models: list[str], runtime: dict) -> dict[str, bool]:
-    """哪些个人模型会走计费接口（独立计费时按分模型配置判断）。"""
+    """哪些个人模型会走计费接口（合并计费时按分模型配置判断）。"""
     return {name: billing_applies(name, runtime) for name in models}
 
 

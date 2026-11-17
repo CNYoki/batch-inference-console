@@ -163,7 +163,7 @@ async def send_test_mail(payload: MailTestRequest, admin: CurrentAdmin, db: DB) 
         input_filename="sample.jsonl", input_path="", input_size=0,
         total_items=1000, completed_items=985, failed_items=15,
         prompt_tokens=120000, completion_tokens=45000,
-        started_at=datetime.now(UTC) - timedelta(minutes=42), finished_at=datetime.now(UTC),
+        started_at=datetime.now(UTC) - timedelta(minutes=42), finished_at=datetime.now(UTC), run_seconds=42 * 60,
     )
     mail = mailer.build_job_mail(sample, admin, "示例模型", runtime)
     mail.to = payload.to

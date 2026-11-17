@@ -7,7 +7,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from ..config import settings
 from ..core.security import decrypt_secret
@@ -52,11 +52,13 @@ class JobRunner:
         self._last_progress_flush = 0.0
         self._last_db_flush = 0.0
         self._counter_lock = asyncio.Lock()
-        # 本次运行是否走独立计费、计费间隔；_load 时按当前设置定下来
+        # 本次运行是否走合并计费、计费间隔；_load 时按当前设置定下来
         self._billing = False
         self._billing_interval = 60.0
         # 计费失败时停下任务的原因，结束时写进任务的 error
         self._billing_error: str | None = None
+        # 这一段运行的开始时间；停下时把时长累加进 Job.run_seconds
+        self._run_started: datetime | None = None
 
     # ------------------------------------------------------------------ #
     async def run(self) -> JobStatus:
@@ -99,7 +101,7 @@ class JobRunner:
         if state.done_indices:
             log.info("任务 %s 断点续跑，已完成 %d 条", self.job_id, len(state.done_indices))
 
-        # 独立计费：先把以前没扣上的补扣掉，扣不上就不开跑
+        # 合并计费：先把以前没扣上的补扣掉，扣不上就不开跑
         if problem := await self._prepare_billing(job):
             log.info("任务 %s 计费未结清，暂停：%s", self.job_id, problem)
             await self._pause_for_billing(problem)
@@ -304,6 +306,10 @@ class JobRunner:
                 elif signal == "pause":
                     self._stop_status = JobStatus.paused
                     stop_event.set()
+                elif signal == "yield":
+                    # 普惠队列模式：这个用户在该模型上超出了配额，让出名额回到队列
+                    self._stop_status = JobStatus.queued
+                    stop_event.set()
                 elif signal == "requeue":
                     # 置顶任务要独占这个模型。先确认置顶还在（可能刚被取消），过时的信号直接丢掉
                     if await self._blocked_by_pin():
@@ -315,7 +321,7 @@ class JobRunner:
             pass
 
     async def _billing_loop(self, stop_event: asyncio.Event) -> None:
-        """独立计费：每隔一段时间把新增用量扣一次费；扣不上就把任务停下来。"""
+        """合并计费：每隔一段时间把新增用量扣一次费；扣不上就把任务停下来。"""
         try:
             while not stop_event.is_set():
                 try:
@@ -342,7 +348,7 @@ class JobRunner:
             return None
 
     async def _prepare_billing(self, job: Job) -> str | None:
-        """按当前设置确定本次是否独立计费，必要时切换计费起点；再把以前没扣上的补扣掉。"""
+        """按当前设置确定本次是否合并计费，必要时切换计费起点；再把以前没扣上的补扣掉。"""
         async with session_scope() as db:
             row = await db.get(Job, self.job_id)
             if row is None:
@@ -431,7 +437,17 @@ class JobRunner:
                 ).scalar_one_or_none()
             return job, mc, None
 
+    def _close_run_values(self) -> dict:
+        """停下时要写回库的耗时字段：把这一段运行的时长累加进 run_seconds。"""
+        if self._run_started is None:
+            return {}
+        elapsed = max(0, int((datetime.now(UTC) - self._run_started).total_seconds()))
+        self._run_started = None
+        return {"run_seconds": Job.run_seconds + elapsed, "run_started_at": None}
+
     async def _mark_running(self) -> None:
+        now = datetime.now(UTC)
+        self._run_started = now
         async with session_scope() as db:
             await db.execute(
                 update(Job)
@@ -439,7 +455,9 @@ class JobRunner:
                 .values(
                     status=JobStatus.running,
                     worker_id=self.worker_id,
-                    started_at=datetime.now(UTC),
+                    # 开始时间记第一次开跑；耗时另按每段运行累加，暂停/排队的时间不算
+                    started_at=func.coalesce(Job.started_at, now),
+                    run_started_at=now,
                     error=None,
                     completed_items=self.completed,
                     failed_items=self.failed,
@@ -455,6 +473,7 @@ class JobRunner:
                 .values(
                     status=JobStatus.failed, error=message[:2000],
                     finished_at=datetime.now(UTC), pinned=False,
+                    **self._close_run_values(),
                 )
             )
         await queue.clear_signal(self.job_id)
@@ -473,6 +492,7 @@ class JobRunner:
             "completion_tokens": self.completion_tokens,
             "cached_tokens": self.cached_tokens,
             "result_size": sizes["output_bytes"] + sizes["errors_bytes"],
+            **self._close_run_values(),
         }
         if status in {JobStatus.succeeded, JobStatus.completed, JobStatus.canceled}:
             values["finished_at"] = datetime.now(UTC)

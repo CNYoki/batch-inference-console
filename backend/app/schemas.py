@@ -199,7 +199,7 @@ class ModelConfigOut(ModelConfigBase):
 
 
 class GatewayReasoningRule(BaseModel):
-    """个人网关的分模型配置：推理开关，以及（独立计费时）单独的推理接口。
+    """个人网关的分模型配置：推理开关，以及（合并计费时）单独的推理接口。
 
     个人模型不在库里，只能靠模型名匹配 —— pattern 支持 * 通配，
     例如 qwen3-* 一条就能覆盖同系列所有模型。按顺序取第一条命中的规则。
@@ -217,7 +217,7 @@ class GatewayReasoningRule(BaseModel):
     # 决定任务页显示哪套参数，优先于按模型名判断；留空 = 模型名含 embed 算 embedding，否则 chat
     model_type: Literal["", "chat", "embedding"] = ""
 
-    # ---- 模型独立计费：只在全局独立计费开启时生效 ----
+    # ---- 模型合并计费：只在全局合并计费开启时生效 ----
     # 规则的稳定标识，保存时靠它找回这条规则已存的 API Key；新规则由后端生成
     id: str | None = Field(default=None, max_length=32)
     billing_override: bool = False
@@ -312,12 +312,12 @@ class ModelOptionsOut(BaseModel):
     gateway_enabled: bool = True
     gateway_label: str = "个人网关"
     gateway_base_url: str = ""
-    # 独立计费：用户填的是 batch 分组 Key，推理走平台接口、按用量扣费
+    # 合并计费：用户填的是 batch 分组 Key，推理走平台接口、按用量扣费
     gateway_billing: bool = False
     has_saved_token: bool = False
     # 拉取个人模型失败时的原因（token 无效、网关不可达等），前端原样展示
     personal_error: str | None = None
-    # 独立计费时用户 Key 的额度
+    # 合并计费时用户 Key 的额度
     personal_key: PersonalKeyInfo | None = None
     # 模型名 -> 是否走计费接口（「仅单独配置的模型计费」打开时不是所有模型都计费）
     personal_billing: dict[str, bool] = Field(default_factory=dict)
@@ -399,6 +399,9 @@ class JobOut(BaseModel):
     queued_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    # 累计运行秒数（不含暂停/排队）；正在运行时前端再加上 run_started_at 到现在的这一段
+    run_seconds: int = 0
+    run_started_at: datetime | None = None
 
 
 class JobListOut(BaseModel):
@@ -500,7 +503,7 @@ class JobDryRunOut(BaseModel):
     usage: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
     response: dict[str, Any] | None = None
-    # 独立计费时试跑的扣费结果；None 表示不涉及计费
+    # 合并计费时试跑的扣费结果；None 表示不涉及计费
     billing: str | None = None
     # False = 扣费失败或计费接口不通，前端据此不提交任务；None = 不涉及计费
     billing_ok: bool | None = None
@@ -840,7 +843,7 @@ class SystemSettingsOut(BaseModel):
     # 按模型名覆盖上面那份默认配置，先命中先生效
     user_gateway_reasoning_rules: list[GatewayReasoningRule] = Field(default_factory=list)
 
-    # ---- 个人网关独立计费 ----
+    # ---- 个人网关合并计费 ----
     user_gateway_billing_enabled: bool = False
     user_gateway_inference_base_url: str = ""
     # 两个密钥都只回掩码
@@ -857,6 +860,8 @@ class SystemSettingsOut(BaseModel):
 
     # ---- 单模型同时运行的任务数上限 ----
     model_job_limits: list[ModelJobLimit] = Field(default_factory=list)
+    # 普惠队列模式：同一模型的名额在有任务排队的用户之间平均分配
+    fair_queue_enabled: bool = False
 
     # ---- 文件保留期 ----
     file_retention_days: int = 0
@@ -920,6 +925,7 @@ class SystemSettingsUpdate(BaseModel):
         default=None, max_length=50
     )
     model_job_limits: list[ModelJobLimit] | None = Field(default=None, max_length=100)
+    fair_queue_enabled: bool | None = None
 
     user_gateway_billing_enabled: bool | None = None
     user_gateway_inference_base_url: str | None = Field(default=None, max_length=1024)

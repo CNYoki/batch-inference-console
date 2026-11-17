@@ -32,7 +32,7 @@ def make_job(**overrides) -> Job:
         input_filename="a.jsonl", input_path="", input_size=0,
         total_items=1000, completed_items=985, failed_items=15,
         prompt_tokens=1200, completion_tokens=450,
-        started_at=datetime.now(UTC) - timedelta(minutes=42, seconds=10),
+        started_at=datetime.now(UTC) - timedelta(minutes=42, seconds=10), run_seconds=42 * 60 + 10,
         finished_at=datetime.now(UTC),
     )
     data.update(overrides)

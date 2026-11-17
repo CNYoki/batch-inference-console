@@ -43,7 +43,7 @@ DEFAULTS: dict = {
     #   "effort_options": [...], "default_effort": "medium"}]
     # pattern 支持 * 通配，按顺序取第一条命中的
     "user_gateway_reasoning_rules": [],
-    # ---- 个人网关独立计费 ----
+    # ---- 个人网关合并计费 ----
     # 开启后推理和计费分开：推理用下面配置的推理接口和平台自己的 Key，
     # 用户填的是网关里 batch 分组的 Key，只用来标识向谁扣费；
     # worker 按用量定期调计费接口（POST /api/batch/billing）扣费
@@ -62,7 +62,7 @@ DEFAULTS: dict = {
     "user_gateway_billing_key_passthrough": False,
     # 推理接口透传用户 Key 时合进请求体的标识，让网关认出这是批量平台发来的请求、放行 batch Key
     "user_gateway_passthrough_marker": {"batch": True},
-    # 仅单独配置的模型计费：只有命中打开了「模型独立计费」的分模型配置的模型才调计费接口，
+    # 仅单独配置的模型计费：只有命中打开了「模型合并计费」的分模型配置的模型才调计费接口，
     # 其余模型照常走全局推理接口、不计费
     "user_gateway_billing_only_matched": False,
     # 限制 API Key 添加：用户新填的 Key 不是 batch 分组就直接拒绝。
@@ -75,6 +75,10 @@ DEFAULTS: dict = {
     # [{"pattern": "qwen3.8-27b", "max_running_jobs": 4}]
     # pattern 支持 * 通配，按顺序取第一条命中的；每个模型名单独计数，0 = 不限
     "model_job_limits": [],
+    # ---- 普惠队列模式 ----
+    # 打开后，设了单模型上限的模型，运行名额在有任务的用户之间平均分配（规则见 services/fair_queue.py），
+    # 超出配额的运行中任务会被要求让出。关闭时严格按队列先后
+    "fair_queue_enabled": False,
     # ---- 文件保留期 ----
     # 终态任务（成功/完成/失败/取消）的输入与结果文件保留多少天，0 = 永久保留。
     # 到期后由 worker 自动清除文件，任务记录与统计保留。

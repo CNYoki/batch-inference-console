@@ -178,6 +178,8 @@ def _to_out(job: Job, queue_position: int | None = None, live: dict[str, str] | 
         queued_at=job.queued_at,
         started_at=job.started_at,
         finished_at=job.finished_at,
+        run_seconds=job.run_seconds or 0,
+        run_started_at=job.run_started_at,
     )
 
 
@@ -396,7 +398,7 @@ def _mask_upstream(data: object, mc: ModelConfig) -> None:
 
 
 async def _bill_dry_run(db: DB, user: User, payload: JobDryRun, usage: dict) -> tuple[str | None, bool | None]:
-    """独立计费时，试跑那一条用的是平台的推理 Key，也要向用户扣费。
+    """合并计费时，试跑那一条用的是平台的推理 Key，也要向用户扣费。
 
     返回（说明，是否扣上）。扣费失败或计费接口不通时前端不提交任务 ——
     整批跑起来同样会扣不上，不如现在就让用户处理。
@@ -863,6 +865,7 @@ async def _settle_orphan(job: Job, new_status: JobStatus) -> None:
     job.failed_items = max(job.failed_items, int(float(live.get("failed", 0))))
     job.status = new_status
     job.worker_id = None
+    job.close_run_segment()
     if new_status == JobStatus.canceled:
         job.finished_at = datetime.now(UTC)
         job.pinned = False

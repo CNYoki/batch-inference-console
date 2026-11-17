@@ -74,7 +74,7 @@ export function JobBillingPanel({ job, onChanged }: { job: Job; onChanged?: () =
 
   if (!data) return <Empty description="加载中…" />
   if (!data.enabled && !data.records.length) {
-    return <Empty description="该任务不走个人网关独立计费" />
+    return <Empty description="该任务不走个人网关合并计费" />
   }
 
   const retry = async () => {

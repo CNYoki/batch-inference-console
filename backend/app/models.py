@@ -314,10 +314,10 @@ class Job(Base, TimestampMixin):
 
     prompt_tokens: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     completion_tokens: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
-    # 命中缓存的输入 token（包含在 prompt_tokens 里），独立计费时按缓存价计
+    # 命中缓存的输入 token（包含在 prompt_tokens 里），合并计费时按缓存价计
     cached_tokens: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
 
-    # ---- 个人网关独立计费 ----
+    # ---- 个人网关合并计费 ----
     # 推理走平台自己的推理接口、再按用量调计费接口向用户扣费。由 worker 每次开跑时按当前设置定下来
     billing_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # 已经切进计费记录的用量（不论那条记录是否已扣费成功）。
@@ -341,6 +341,10 @@ class Job(Base, TimestampMixin):
     queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 实际运行的累计秒数：每段运行（开跑 → 暂停/让出/结束）结束时累加进来，暂停、排队的时间不算
+    run_seconds: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    # 当前这段运行的开始时间；不在运行时为空。展示耗时 = run_seconds + (现在 - run_started_at)
+    run_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     user: Mapped[User] = relationship(back_populates="jobs")
     model_config: Mapped[ModelConfig | None] = relationship(back_populates="jobs")
@@ -348,6 +352,17 @@ class Job(Base, TimestampMixin):
     errors: Mapped[list[JobError]] = relationship(
         back_populates="job", cascade="all, delete-orphan", passive_deletes=True
     )
+
+    def close_run_segment(self, now: datetime | None = None) -> None:
+        """把当前这段运行的时长累加进 run_seconds（替已经没了的 worker 收尾时用）。"""
+        if self.run_started_at is None:
+            return
+        now = now or datetime.now(UTC)
+        start = self.run_started_at
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=UTC)
+        self.run_seconds = (self.run_seconds or 0) + max(0, int((now - start).total_seconds()))
+        self.run_started_at = None
 
     __table_args__ = (
         Index("ix_jobs_user_created", "user_id", "created_at"),

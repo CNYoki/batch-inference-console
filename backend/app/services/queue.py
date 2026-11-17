@@ -166,6 +166,9 @@ class JobQueue:
     def k_model_running(self, model: str) -> str:
         return f"{self.prefix}:model_running:{model}"
 
+    def k_fair_stop(self, model: str) -> str:
+        return f"{self.prefix}:fair_stop:{model}"
+
     def k_ctrl(self, job_id: str) -> str:
         return f"{self.prefix}:ctrl:{job_id}"
 
@@ -218,6 +221,34 @@ class JobQueue:
         if not model:
             return set()
         return set(await self.redis.smembers(self.k_model_running(model)))
+
+    async def live_running_on_model(self, model: str) -> list[str]:
+        """登记在该模型名下、且租约还在的任务（和领取脚本的计数口径一致）。"""
+        members = list(await self.running_on_model(model))
+        if not members:
+            return []
+        async with self.redis.pipeline(transaction=False) as pipe:
+            for m in members:
+                pipe.zscore(self.k_lease, m)
+            scores = await pipe.execute()
+        return [m for m, sc in zip(members, scores, strict=True) if sc is not None]
+
+    async def fair_last_stops(self, models: list[str]) -> dict[str, dict[str, float]]:
+        """普惠模式：每个模型上各用户最近一次有任务停下（跑完/让出/暂停）的时间。"""
+        if not models:
+            return {}
+        async with self.redis.pipeline(transaction=False) as pipe:
+            for m in models:
+                pipe.hgetall(self.k_fair_stop(m))
+            rows = await pipe.execute()
+        return {m: {u: float(ts) for u, ts in (row or {}).items()} for m, row in zip(models, rows, strict=True)}
+
+    async def mark_fair_stop(self, model: str, user_id: str) -> None:
+        key = self.k_fair_stop(model)
+        async with self.redis.pipeline(transaction=False) as pipe:
+            pipe.hset(key, user_id, str(time.time()))
+            pipe.expire(key, 7 * 86400)
+            await pipe.execute()
 
     async def remove(self, job_id: str) -> None:
         """从队列与租约中彻底摘除（取消任务时用）。"""

@@ -16,7 +16,7 @@ import MoveToProjectModal from '../components/MoveToProjectModal'
 import ProjectSelect from '../components/ProjectSelect'
 import { useAuth } from '../hooks/useAuth'
 import { usePolling } from '../hooks/usePolling'
-import { ACTIVE_STATUSES, STATUS_LABEL, formatDateTime, formatDuration, formatNumber } from '../utils'
+import { ACTIVE_STATUSES, STATUS_LABEL, formatDateTime, formatNumber, formatRunDuration, progressProps } from '../utils'
 
 const STATUS_OPTIONS = (Object.keys(STATUS_LABEL) as JobStatus[]).map((s) => ({
   value: s, label: STATUS_LABEL[s],
@@ -209,13 +209,13 @@ export default function JobsPage() {
           <Progress
             percent={job.progress}
             size="small"
-            status={job.status === 'running' ? 'active' : job.failed_items ? 'exception' : undefined}
+            {...progressProps(job)}
           />
         </Tooltip>
       ),
     },
     { title: '耗时', width: 110,
-      render: (_, job) => formatDuration(job.started_at, job.finished_at) },
+      render: (_, job) => formatRunDuration(job) },
     { title: '创建时间', dataIndex: 'created_at', width: 170, render: formatDateTime },
     {
       title: '操作', width: 120, fixed: 'right',

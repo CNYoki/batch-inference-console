@@ -208,7 +208,7 @@ export default function NewJobPage() {
         setDry({ phase: 'failed', job, error: res.error || '试跑失败', result: res })
         return
       }
-      // 独立计费时试跑那条也要扣费；扣不上就不提交 —— 整批跑起来同样扣不上
+      // 合并计费时试跑那条也要扣费；扣不上就不提交 —— 整批跑起来同样扣不上
       if (res.billing_ok === false) {
         setDry({ phase: 'failed', job, error: res.billing || '试跑计费失败', result: res })
         return

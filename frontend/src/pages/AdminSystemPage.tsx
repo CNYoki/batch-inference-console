@@ -167,7 +167,7 @@ export default function AdminSystemPage() {
         user_gateway_max_retries: values.user_gateway_max_retries,
         user_gateway_max_tokens_cap: values.user_gateway_max_tokens_cap,
         user_gateway_billing_enabled: values.user_gateway_billing_enabled,
-        // 关掉独立计费时这几项被收起、不在表单里，不提交以免把已填的配置清空
+        // 关掉合并计费时这几项被收起、不在表单里，不提交以免把已填的配置清空
         ...(values.user_gateway_inference_base_url !== undefined
           ? { user_gateway_inference_base_url: values.user_gateway_inference_base_url } : {}),
         ...(values.user_gateway_billing_url !== undefined
@@ -220,6 +220,7 @@ export default function AdminSystemPage() {
             pattern: r.pattern.trim(),
             max_running_jobs: r.max_running_jobs ?? 0,
           })),
+        fair_queue_enabled: !!values.fair_queue_enabled,
         smtp_enabled: values.smtp_enabled,
         smtp_host: values.smtp_host,
         smtp_port: values.smtp_port,
@@ -469,7 +470,7 @@ export default function AdminSystemPage() {
             <Input className="mono" placeholder="https://gateway.example.com/v1" style={{ maxWidth: 460 }} />
           </Form.Item>
 
-          <Form.Item name="user_gateway_billing_enabled" label="独立计费" valuePropName="checked"
+          <Form.Item name="user_gateway_billing_enabled" label="合并计费" valuePropName="checked"
             extra="开启后推理与计费分开：用户填写个人网关里 batch 分组的 Key（仍用它在上面的网关地址拉取模型列表），
               推理改走下面的推理接口，平台按用量调用计费接口向用户扣费">
             <Switch />
@@ -482,7 +483,7 @@ export default function AdminSystemPage() {
                   <Form.Item name="user_gateway_inference_base_url" label="推理接口 URL"
                     extra="OpenAI 兼容地址，填到 /v1 为止，执行任务时请求 {地址}/chat/completions"
                     rules={[
-                      { required: true, message: '开启独立计费时必填' },
+                      { required: true, message: '开启合并计费时必填' },
                       { pattern: /^https?:\/\//, message: '必须以 http:// 或 https:// 开头' },
                     ]}>
                     <Input className="mono" placeholder="https://inference.example.com/v1" />
@@ -513,7 +514,7 @@ export default function AdminSystemPage() {
                   <Form.Item name="user_gateway_billing_url" label="计费接口 URL"
                     extra="个人网关的批量计费接口完整地址"
                     rules={[
-                      { required: true, message: '开启独立计费时必填' },
+                      { required: true, message: '开启合并计费时必填' },
                       { pattern: /^https?:\/\//, message: '必须以 http:// 或 https:// 开头' },
                     ]}>
                     <Input className="mono" placeholder="https://gateway.example.com/api/batch/billing" />
@@ -559,7 +560,7 @@ export default function AdminSystemPage() {
                 )}
                 <Form.Item name="user_gateway_billing_only_matched" label="仅单独配置的模型计费"
                   valuePropName="checked"
-                  extra="打开后只有命中「分模型配置」里打开了「模型独立计费」的模型才调计费接口，其余模型照常推理、不计费">
+                  extra="打开后只有命中「分模型配置」里打开了「模型合并计费」的模型才调计费接口，其余模型照常推理、不计费">
                   <Switch />
                 </Form.Item>
                 <Form.Item name="user_gateway_billing_interval" label="计费间隔(秒)"
@@ -653,7 +654,7 @@ export default function AdminSystemPage() {
                         <Tag color={rules?.[name]?.enabled === false ? 'default' : 'green'}>
                           {rules?.[name]?.enabled === false ? '不支持推理' : '支持推理'}
                         </Tag>
-                        {rules?.[name]?.billing_override && <Tag color="blue">模型独立计费</Tag>}
+                        {rules?.[name]?.billing_override && <Tag color="blue">模型合并计费</Tag>}
                         {rules?.[name]?.model_type === 'embedding' && <Tag color="purple">Embedding</Tag>}
                         {rules?.[name]?.model_type === 'chat' && <Tag color="cyan">Chat</Tag>}
                         {!!rules?.[name]?.effort_options?.length && (
@@ -715,11 +716,11 @@ export default function AdminSystemPage() {
                                 .map((v) => ({ value: v, label: v }))} />
                           </Form.Item>
                         </Space>
-                        <Form.Item {...rest} name={[name, 'billing_override']} label="模型独立计费"
+                        <Form.Item {...rest} name={[name, 'billing_override']} label="模型合并计费"
                           valuePropName="checked"
                           extra={billingOn
                             ? '打开后这些模型可单独指定推理接口和实际请求的模型名；留空的项沿用全局推理接口'
-                            : '全局「独立计费」未开启，这里的配置不会生效'}>
+                            : '全局「合并计费」未开启，这里的配置不会生效'}>
                           <Switch />
                         </Form.Item>
                         {rules?.[name]?.billing_override && (
@@ -803,6 +804,15 @@ export default function AdminSystemPage() {
               </>
             )}
           </Form.List>
+          <Form.Item name="fair_queue_enabled" label="普惠队列模式" valuePropName="checked"
+            extra={<>
+              对上面设了上限的模型，运行名额在有任务的用户之间平均分配，与各人任务多少无关：上限 4 时 A、B、C、D
+              各跑 1 个（哪怕 D 排了 100 个）；A 10 个、B 3 个时各 2 个；B 只有 1 个时 A 跑 3 个；除不尽时多出来的给先来的人。
+              新用户进来时，超出配额的运行中任务会自动让出名额回到队列（已完成的条目保留、之后断点续跑）。
+              人比名额多时按先后排队，空出的名额给等得最久的人。每人自己的任务仍按队列先后；被置顶任务占着的模型不参与。
+            </>}>
+            <Switch />
+          </Form.Item>
           <Button type="primary" loading={saving} onClick={() => void saveSettings()}>保存设置</Button>
         </Form>
       </Card>

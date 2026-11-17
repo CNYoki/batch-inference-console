@@ -9,6 +9,7 @@ import json
 import os
 import time
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -126,8 +127,8 @@ async def test_worker_skips_jobs_over_model_limit(rq: JobQueue, monkeypatch):
         await write_runtime(db, {"model_job_limits": [{"pattern": "qwen3.8-*", "max_running_jobs": 2}]})
 
     try:
-        for jid, priority in zip(ids, (10, 10, 10, 20), strict=True):
-            await rq.enqueue(jid, priority)
+        for i, (jid, priority) in enumerate(zip(ids, (10, 10, 10, 20), strict=True)):
+            await rq.enqueue(jid, priority, ts=1_000_000.0 + i)
         monkeypatch.setattr(wm, "queue", rq)
         worker = wm.Worker()
 
@@ -146,3 +147,81 @@ async def test_worker_skips_jobs_over_model_limit(rq: JobQueue, monkeypatch):
                 await db.delete(await db.get(Job, jid))
             for mid in model_ids:
                 await db.delete(await db.get(ModelConfig, mid))
+
+
+@pytest.mark.asyncio
+async def test_worker_fair_mode_takes_back_slots_for_new_users(rq: JobQueue, monkeypatch):
+    """普惠队列模式：上限 4，A 先占满 4 个；B、C、D 进来后 A 让出 3 个，变成各跑 1 个。"""
+    from sqlalchemy import select
+
+    import app.worker.main as wm
+    from app.db import session_scope
+    from app.models import Job, JobStatus, ModelConfig, User
+    from app.services.fair_queue import rebalance
+    from app.services.settings_store import write_runtime
+
+    rules = [{"pattern": "qwen3.8-27b", "max_running_jobs": 4}]
+    async with session_scope() as db:
+        admin = (await db.execute(select(User).where(User.username == "admin"))).scalar_one()
+        users = [User(username=f"fair{c}-{rq.prefix}", password_hash="x") for c in "BCD"]
+        mc = ModelConfig(name=f"fair-{rq.prefix}", display_name="普惠模型",
+                         base_url="http://x/v1", model_name="qwen3.8-27b")
+        db.add_all([*users, mc])
+        await db.flush()
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        jobs = [
+            Job(name=f"{tag}{i}", user_id=uid, status=JobStatus.queued, model_config_id=mc.id,
+                input_filename="a.jsonl", input_path="/tmp/none.jsonl",
+                queued_at=base + timedelta(minutes=minute + i))
+            for tag, uid, n, minute in (
+                ("a", admin.id, 6, 0), ("b", users[0].id, 2, 10),
+                ("c", users[1].id, 2, 20), ("d", users[2].id, 20, 30),
+            )
+            for i in range(n)
+        ]
+        db.add_all(jobs)
+        await db.flush()
+        by_tag = {t: [j.id for j in jobs if j.name.startswith(t)] for t in "abcd"}
+        all_ids = [j.id for j in jobs]
+        user_ids, mc_id = [u.id for u in users], mc.id
+        await write_runtime(db, {"model_job_limits": rules, "fair_queue_enabled": True})
+
+    def ts(job_id: str) -> float:
+        return all_ids.index(job_id) + 1_000_000.0
+
+    try:
+        monkeypatch.setattr(wm, "queue", rq)
+        worker = wm.Worker()
+        for jid in by_tag["a"]:
+            await rq.enqueue(jid, ts=ts(jid))
+        # 只有 A 在排队：4 个名额都给 A
+        assert [await worker._claim() for _ in range(4)] == by_tag["a"][:4]
+
+        for jid in by_tag["b"] + by_tag["c"] + by_tag["d"]:
+            await rq.enqueue(jid, ts=ts(jid))
+        assert await worker._claim() is None   # 名额还被 A 占着
+
+        async with session_scope() as db:
+            signaled = await rebalance(db, rq, await rq.peek(0, 100), rules, {})
+        # A 留下最早的那个，后面 3 个让出
+        assert sorted(signaled) == sorted(by_tag["a"][1:4])
+        for jid in signaled:
+            assert await rq.get_signal(jid) == "yield"
+            await rq.release(jid)             # worker 停下、释放租约后带着原入队时间回到队列
+            await rq.clear_signal(jid)
+            await rq.enqueue(jid, ts=ts(jid))
+
+        claimed = [await worker._claim() for _ in range(3)]
+        assert claimed == [by_tag["b"][0], by_tag["c"][0], by_tag["d"][0]]
+        assert await worker._claim() is None
+        async with session_scope() as db:
+            assert await rebalance(db, rq, await rq.peek(0, 100), rules, {}) == []
+    finally:
+        async with session_scope() as db:
+            await write_runtime(db, {"model_job_limits": [], "fair_queue_enabled": False})
+        async with session_scope() as db:
+            for jid in all_ids:
+                await db.delete(await db.get(Job, jid))
+            await db.delete(await db.get(ModelConfig, mc_id))
+            for uid in user_ids:
+                await db.delete(await db.get(User, uid))

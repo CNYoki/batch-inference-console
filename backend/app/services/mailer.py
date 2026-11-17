@@ -63,15 +63,15 @@ def render(template: str, values: dict[str, Any], as_html: bool = False) -> str:
 
 
 def _format_duration(job: Job) -> str:
+    """实际运行的累计时长，暂停、排队的时间不算。"""
     if not job.started_at:
         return "—"
-    end = job.finished_at or datetime.now(UTC)
-    start = job.started_at
-    if start.tzinfo is None:
-        start = start.replace(tzinfo=UTC)
-    if end.tzinfo is None:
-        end = end.replace(tzinfo=UTC)
-    seconds = max(0, int((end - start).total_seconds()))
+    seconds = job.run_seconds or 0
+    if job.run_started_at:
+        start = job.run_started_at
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=UTC)
+        seconds += max(0, int((datetime.now(UTC) - start).total_seconds()))
     if seconds < 60:
         return f"{seconds} 秒"
     if seconds < 3600:

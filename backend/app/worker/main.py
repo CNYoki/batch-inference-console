@@ -19,6 +19,7 @@ from ..config import settings
 from ..db import engine, session_scope
 from ..models import JobStatus
 from ..services import billing
+from ..services.fair_queue import compute_shares, job_owners, rebalance
 from ..services.model_limits import job_limit_for, job_model_names
 from ..services.pins import pinned_models, requeue_preempted
 from ..services.queue import CLAIM_BLOCKED, CLAIM_OK, queue
@@ -37,6 +38,7 @@ REAP_SECONDS = 30.0
 DEAD_WORKER_SECONDS = 600.0
 RETENTION_SECONDS = 3600.0   # 保留期清理的扫描间隔
 BILLING_SWEEP_SECONDS = 30.0  # 计费补扣巡检间隔
+FAIR_BALANCE_SECONDS = 5.0    # 普惠队列模式下检查配额、让出超额任务的间隔
 # 领任务时每次看队列里多少个、最多往后看多少个。前面的都被单模型上限挡住时往后找
 CLAIM_PAGE = 100
 CLAIM_SCAN_MAX = 2000
@@ -71,6 +73,7 @@ class Worker:
             asyncio.create_task(self._reaper_loop()),
             asyncio.create_task(self._retention_loop()),
             asyncio.create_task(self._billing_loop()),
+            asyncio.create_task(self._fair_loop()),
         ]
         try:
             await self._claim_loop()
@@ -121,17 +124,22 @@ class Worker:
         免得一个被限流的模型把整条队列堵死。
         模型被置顶任务占着的，只领置顶任务本身。
         """
-        rules: list[dict] | None = None
-        pins: dict[str, set[str]] = {}
+        first = await queue.peek(0, CLAIM_PAGE)
+        if not first:
+            return None
+        async with session_scope() as db:
+            runtime = await read_runtime(db)
+            pins = await pinned_models(db)
+        rules: list[dict] = runtime.get("model_job_limits") or []
+        if runtime.get("fair_queue_enabled"):
+            return await self._claim_fair(first, rules, pins)
+
         blocked: set[str] = set()
         for offset in range(0, CLAIM_SCAN_MAX, CLAIM_PAGE):
-            candidates = await queue.peek(offset, CLAIM_PAGE)
+            candidates = first if offset == 0 else await queue.peek(offset, CLAIM_PAGE)
             if not candidates:
                 return None
             async with session_scope() as db:
-                if rules is None:
-                    rules = (await read_runtime(db)).get("model_job_limits") or []
-                    pins = await pinned_models(db)
                 models = await job_model_names(db, candidates)
             for job_id in candidates:
                 model = models.get(job_id, "")
@@ -146,6 +154,45 @@ class Worker:
                     blocked.add(model)
         return None
 
+    async def _peek_all(self, first: list[str]) -> list[str]:
+        candidates = list(first)
+        while len(candidates) < CLAIM_SCAN_MAX and len(candidates) % CLAIM_PAGE == 0:
+            page = await queue.peek(len(candidates), CLAIM_PAGE)
+            if not page:
+                break
+            candidates.extend(page)
+        return candidates
+
+    async def _claim_fair(
+        self, first: list[str], rules: list[dict], pins: dict[str, set[str]],
+    ) -> str | None:
+        """普惠队列模式：按队列先后找，参与均分的模型只领还没用满配额的用户的任务（规则见 fair_queue）。
+
+        多个 worker 同时领时各自看到的在跑数可能差一个，单模型上限仍由领取脚本原子地把关，
+        多领的会在下一轮巡检时被要求让出。
+        """
+        candidates = await self._peek_all(first)
+        async with session_scope() as db:
+            shares, owners = await compute_shares(db, queue, candidates, rules, pins)
+
+        blocked: set[str] = set()
+        for job_id in candidates:
+            owner = owners.get(job_id)
+            model = owner.model if owner else ""
+            if model in blocked:
+                continue
+            if model in pins and job_id not in pins[model]:
+                continue
+            share = shares.get(model)
+            if share is not None and owner is not None and not share.can_claim(owner.user_id):
+                continue
+            result = await queue.claim_job(job_id, self.id, model, job_limit_for(model, rules))
+            if result == CLAIM_OK:
+                return job_id
+            if result == CLAIM_BLOCKED:
+                blocked.add(model)
+        return None
+
     async def _run_job(self, job_id: str) -> None:
         status: JobStatus | None = None
         try:
@@ -158,6 +205,14 @@ class Worker:
                 await queue.release(job_id)
             except Exception as exc:  # noqa: BLE001
                 log.warning("释放任务 %s 租约失败: %s", job_id, exc)
+            try:
+                # 普惠队列模式排先后要用：这个用户在这个模型上最近一次有任务停下的时间
+                async with session_scope() as db:
+                    owner = (await job_owners(db, [job_id])).get(job_id)
+                if owner and owner.model:
+                    await queue.mark_fair_stop(owner.model, owner.user_id)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("记录任务 %s 停止时间失败: %s", job_id, exc)
         if status == JobStatus.queued:
             # 让给了置顶任务。必须在释放租约之后再入队：
             # 先入队的话别的 worker 可能立刻领走，再被这边的释放把租约删掉
@@ -225,7 +280,7 @@ class Worker:
             await asyncio.sleep(RETENTION_SECONDS)
 
     async def _billing_loop(self) -> None:
-        """个人网关独立计费的补扣：重发失败过的临时错误，补切没在运行的任务的差额。
+        """个人网关合并计费的补扣：重发失败过的临时错误，补切没在运行的任务的差额。
 
         运行中的任务由各自的 runner 定期扣费，这里只兜底。同一时刻只让一个 worker 扫，
         就算两个同时扫也不会重复扣：切记录有乐观锁，发送前要先认领。
@@ -239,6 +294,26 @@ class Worker:
                         log.info("计费巡检：补切 %d 笔，发送 %d 笔", result["cut"], result["sent"])
             except Exception as exc:  # noqa: BLE001 — 计费巡检失败不能影响任务执行
                 log.warning("计费巡检失败: %s", exc)
+
+    async def _fair_loop(self) -> None:
+        """普惠队列模式：定期让超出配额的运行中任务让出名额。同一时刻只让一个 worker 扫。"""
+        while True:
+            await asyncio.sleep(FAIR_BALANCE_SECONDS)
+            try:
+                async with session_scope() as db:
+                    runtime = await read_runtime(db)
+                    if not runtime.get("fair_queue_enabled"):
+                        continue
+                    if not await queue.acquire_lock("fair", ttl=int(FAIR_BALANCE_SECONDS) - 1):
+                        continue
+                    queued = await self._peek_all(await queue.peek(0, CLAIM_PAGE))
+                    if queued:
+                        await rebalance(
+                            db, queue, queued, runtime.get("model_job_limits") or [],
+                            await pinned_models(db),
+                        )
+            except Exception as exc:  # noqa: BLE001 — 巡检失败不能影响任务执行
+                log.warning("普惠队列巡检失败: %s", exc)
 
     async def _reaper_loop(self) -> None:
         """回收租约过期的任务，并清掉心跳早已停止的 worker 记录（持有者进程崩溃/被杀）。"""

@@ -17,7 +17,7 @@ import MoveToProjectModal from '../components/MoveToProjectModal'
 import { useAuth } from '../hooks/useAuth'
 import { usePolling } from '../hooks/usePolling'
 import { JobBillingPanel } from '../components/BillingRecords'
-import { ACTIVE_STATUSES, formatBytes, formatDateTime, formatDuration, formatNumber } from '../utils'
+import { ACTIVE_STATUSES, formatBytes, formatDateTime, formatNumber, formatRunDuration, progressProps } from '../utils'
 
 export default function JobDetailPage() {
   const { jobId = '' } = useParams()
@@ -207,7 +207,7 @@ export default function JobDetailPage() {
         <Progress
           style={{ marginTop: 20 }}
           percent={job.progress}
-          status={job.status === 'running' ? 'active' : job.failed_items ? 'exception' : undefined}
+          {...progressProps(job)}
         />
 
         <Row gutter={16} style={{ marginTop: 16 }}>
@@ -291,7 +291,7 @@ export default function JobDetailPage() {
                   <Descriptions.Item label="模型">
                     <Space size={4}>
                       <Tag color={job.model_source === 'shared' ? 'blue' : 'default'}>
-                        {job.model_source === 'shared' ? '公用' : job.billing_enabled ? '个人网关 · 独立计费' : '个人 token'}
+                        {job.model_source === 'shared' ? '公用' : job.billing_enabled ? '个人网关 · 合并计费' : '个人 token'}
                       </Tag>
                       <span className={job.model_source === 'personal' ? 'mono' : undefined}>
                         {job.model_display_name ?? '—'}
@@ -309,7 +309,7 @@ export default function JobDetailPage() {
                     {job.input_filename}（{formatBytes(job.input_size)}）
                   </Descriptions.Item>
                   <Descriptions.Item label="耗时">
-                    {formatDuration(job.started_at, job.finished_at)}
+                    {formatRunDuration(job)}
                   </Descriptions.Item>
                   <Descriptions.Item label="创建时间">{formatDateTime(job.created_at)}</Descriptions.Item>
                   <Descriptions.Item label="开始时间">{formatDateTime(job.started_at)}</Descriptions.Item>

@@ -12,7 +12,7 @@ import { api } from '../api'
 import type { Job, QueueView } from '../api'
 import JobStatusTag from '../components/JobStatusTag'
 import { usePolling } from '../hooks/usePolling'
-import { formatDateTime, formatNumber } from '../utils'
+import { formatDateTime, formatNumber, progressProps } from '../utils'
 
 function modelCell(job: Job) {
   return (
@@ -115,7 +115,7 @@ export default function AdminQueuePage() {
     {
       title: '进度', width: 180,
       render: (_, job) => <Progress percent={job.progress} size="small"
-        status={job.status === 'running' ? 'active' : undefined} />,
+        {...progressProps(job)} />,
     },
     { title: '置顶时间', width: 170, render: (_, job) => formatDateTime(job.pinned_at) },
     {

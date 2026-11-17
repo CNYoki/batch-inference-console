@@ -41,3 +41,4 @@ async def job_model_names(db: AsyncSession, job_ids: list[str]) -> dict[str, str
         if name:
             out[job_id] = name
     return out
+

@@ -1,4 +1,4 @@
-"""个人网关独立计费：切记录不重复、按错误码处理、runner 定期扣费与扣不上时暂停。
+"""个人网关合并计费：切记录不重复、按错误码处理、runner 定期扣费与扣不上时暂停。
 
 网关（推理接口 + 计费接口）用 httpx.MockTransport 模拟；runner 的信号/进度要用 Redis，
 连不上时相关用例跳过。
@@ -627,7 +627,7 @@ async def test_switching_between_gateway_models_bills_each_model_separately(
 
 
 # --------------------------------------------------------------------------- #
-# 分模型配置：模型独立计费（单独的推理接口、重定向模型名）
+# 分模型配置：模型合并计费（单独的推理接口、重定向模型名）
 # --------------------------------------------------------------------------- #
 def _route_runtime(**rule) -> dict:
     return {
@@ -651,7 +651,7 @@ def test_model_route_overrides_and_falls_back():
     # 留空的项各自退回全局
     partial = _route_runtime(billing_override=True, upstream_model="real-model")
     assert resolve_route("gw-m", partial, "sk-batch") == (INFER, "platform-key", "real-model")
-    # 规则没打开「模型独立计费」，或全局独立计费没开，都不看分模型的这几项
+    # 规则没打开「模型合并计费」，或全局合并计费没开，都不看分模型的这几项
     assert resolve_route("gw-m", {**full, "user_gateway_reasoning_rules": [
         {**full["user_gateway_reasoning_rules"][0], "billing_override": False}]}, "sk") == (INFER, "platform-key", "gw-m")
     off = {**full, "user_gateway_billing_enabled": False, "user_gateway_base_url": "http://gw.test/v1"}
@@ -821,7 +821,7 @@ def test_only_matched_models_are_billed():
     assert billing_applies("gw-m", runtime) and billing_applies("other", runtime)
     only = {**runtime, "user_gateway_billing_only_matched": True}
     assert billing_applies("gw-m", only)
-    # 没命中、或命中了但没打开「模型独立计费」的都不计费
+    # 没命中、或命中了但没打开「模型合并计费」的都不计费
     assert not billing_applies("other", only)
     assert not billing_applies("gw-m", {**only, "user_gateway_reasoning_rules": [
         {"pattern": "gw-*", "billing_override": False}]})
@@ -885,6 +885,6 @@ def test_passthrough_requests_carry_batch_marker():
     assert "batch" not in build_request_body(build_personal_config("gw-m", "sk", own_key), {"messages": []}, {}, None)
     rule_pt = _route_runtime(billing_override=True, inference_key_passthrough=True)
     assert build_request_body(build_personal_config("gw-m", "sk", rule_pt), {"messages": []}, {}, None)["batch"] is True
-    # 直连模式（没开独立计费）不带
+    # 直连模式（没开合并计费）不带
     direct = {**DEFAULTS, "user_gateway_base_url": "http://gw.test/v1"}
     assert "batch" not in build_request_body(build_personal_config("gw-m", "sk", direct), {"messages": []}, {}, None)

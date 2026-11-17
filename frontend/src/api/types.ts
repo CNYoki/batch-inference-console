@@ -75,7 +75,7 @@ export interface ModelOptions {
   gateway_enabled: boolean
   gateway_label: string
   gateway_base_url: string
-  /** 独立计费：用户填 batch 分组 Key，推理走平台接口、按用量扣费 */
+  /** 合并计费：用户填 batch 分组 Key，推理走平台接口、按用量扣费 */
   gateway_billing: boolean
   has_saved_token: boolean
   personal_error?: string | null
@@ -94,7 +94,7 @@ export interface PersonalModels {
   billing?: Record<string, boolean>
 }
 
-/** 独立计费时用户 batch Key 的额度（网关内部单位，默认 500000 = $1） */
+/** 合并计费时用户 batch Key 的额度（网关内部单位，默认 500000 = $1） */
 export interface PersonalKeyInfo {
   name: string
   group?: string | null
@@ -126,7 +126,7 @@ export interface GatewayReasoningRule {
   default_effort: string
   /** 决定任务页显示哪套参数，优先于按模型名判断；空串表示按模型名判断 */
   model_type?: ModelType | ''
-  /** 模型独立计费：只在全局独立计费开启时生效 */
+  /** 模型合并计费：只在全局合并计费开启时生效 */
   id?: string | null
   billing_override?: boolean
   inference_base_url?: string
@@ -165,7 +165,7 @@ export interface Job {
   prompt_tokens: number
   completion_tokens: number
   cached_tokens: number
-  /** 个人网关独立计费 */
+  /** 个人网关合并计费 */
   billing_enabled: boolean
   concurrency: number
   params: Record<string, unknown>
@@ -178,6 +178,10 @@ export interface Job {
   queued_at?: string | null
   started_at?: string | null
   finished_at?: string | null
+  /** 累计运行秒数，不含暂停/排队的时间 */
+  run_seconds?: number
+  /** 当前这段运行的开始时间；不在运行时为空 */
+  run_started_at?: string | null
 }
 
 export interface JobList {
@@ -283,12 +287,14 @@ export interface SystemSettings {
   /** 推理 / 计费接口的 API Key 透传用户自己的 Key */
   user_gateway_inference_key_passthrough: boolean
   user_gateway_billing_key_passthrough: boolean
-  /** 只有命中「模型独立计费」的模型才调计费接口 */
+  /** 只有命中「模型合并计费」的模型才调计费接口 */
   user_gateway_billing_only_matched: boolean
   /** 推理接口透传用户 Key 时合进请求体的 batch 标识 */
   user_gateway_passthrough_marker: Record<string, unknown>
 
   model_job_limits: ModelJobLimit[]
+  /** 普惠队列模式：同一模型的名额在用户之间平均分配 */
+  fair_queue_enabled: boolean
 
   file_retention_days: number
   purge_input_files: boolean
@@ -432,7 +438,7 @@ export interface DryRunResult {
   usage: Record<string, number>
   error?: string | null
   response?: Record<string, unknown> | null
-  /** 独立计费时试跑的扣费结果 */
+  /** 合并计费时试跑的扣费结果 */
   billing?: string | null
   /** false = 扣费失败或计费接口不通，不提交任务 */
   billing_ok?: boolean | null
